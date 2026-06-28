@@ -70,14 +70,14 @@ func TestToolNameRewrite_KnownLowercaseToolsBecomeTitleCase(t *testing.T) {
 	}
 
 	var bodyJSON strings.Builder
-	bodyJSON.WriteString(`{"tools":[`)
+	_, _ = bodyJSON.WriteString(`{"tools":[`)
 	for i, tool := range knownTools {
 		if i > 0 {
-			bodyJSON.WriteByte(',')
+			_ = bodyJSON.WriteByte(',')
 		}
 		_, _ = fmt.Fprintf(&bodyJSON, `{"name":%q,"input_schema":{}}`, tool.lower)
 	}
-	bodyJSON.WriteString(`]}`)
+	_, _ = bodyJSON.WriteString(`]}`)
 	body := []byte(bodyJSON.String())
 
 	rw := buildToolNameRewriteFromBody(body)
