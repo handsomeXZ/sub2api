@@ -3,7 +3,6 @@ package service
 import (
 	"fmt"
 	"hash/fnv"
-	"math/rand"
 	"sort"
 	"strings"
 
@@ -16,25 +15,31 @@ import (
 // 请求阶段写入，响应阶段读取，用于 bytes 级逆向还原假名 → 真名。
 const toolNameRewriteKey = "claude_tool_name_rewrite"
 
-// staticToolNameRewrites 是"静态前缀映射"，与 Parrot src/transform/cc_mimicry.py
-// TOOL_NAME_REWRITES 完全一致。只有以这些前缀开头的工具会被重写。
+// staticToolNameRewrites 是历史 Parrot 前缀映射；主请求重写不再使用它，
+// 仅在响应还原阶段作为弱兼容保留。
 var staticToolNameRewrites = map[string]string{
 	"sessions_": "cc_sess_",
 	"session_":  "cc_ses_",
 }
 
-// fakeToolNamePrefixes 是"动态映射"的前缀池，与 Parrot _FAKE_PREFIXES 一致。
-// 当 tools 数量 > dynamicToolMapThreshold 时随机选用其中前缀生成可读假名。
-var fakeToolNamePrefixes = []string{
-	"analyze_", "compute_", "fetch_", "generate_", "lookup_", "modify_",
-	"process_", "query_", "render_", "resolve_", "sync_", "update_",
-	"validate_", "convert_", "extract_", "manage_", "monitor_", "parse_",
-	"review_", "search_", "transform_", "handle_", "invoke_", "notify_",
+// knownToolTitleCaseRewrites maps known Claude Code/OpenCode tool names to the
+// official Claude Code TitleCase names used on OAuth traffic.
+var knownToolTitleCaseRewrites = map[string]string{
+	"bash":         "Bash",
+	"read":         "Read",
+	"write":        "Write",
+	"edit":         "Edit",
+	"glob":         "Glob",
+	"grep":         "Grep",
+	"task":         "Task",
+	"webfetch":     "WebFetch",
+	"todowrite":    "TodoWrite",
+	"question":     "Question",
+	"skill":        "Skill",
+	"ls":           "LS",
+	"todoread":     "TodoRead",
+	"notebookedit": "NotebookEdit",
 }
-
-// dynamicToolMapThreshold 与 Parrot 一致：tools 数量超过 5 才启用动态映射。
-// 少量工具不需要混淆（一般是 Claude Code 自己的核心工具 bash/edit/read 等）。
-const dynamicToolMapThreshold = 5
 
 // ToolNameRewrite 是单次请求内的工具名混淆映射。
 //   - Forward: real → fake，请求阶段在 body 上应用。
@@ -49,62 +54,6 @@ type ToolNameRewrite struct {
 	ReverseOrdered [][2]string
 }
 
-// buildDynamicToolMap 构造 tools 的动态假名映射。
-//
-// 与 Parrot _build_dynamic_tool_map 语义等价：
-//   - tools 数量 ≤ dynamicToolMapThreshold 时返回 nil（不做动态映射，走静态 fallback）
-//   - 同一组 tool_names 在同进程内映射稳定（保证 cache 命中）
-//
-// Parrot 用 `random.Random(hash(tuple(tool_names)))` 作 seed + shuffle 前缀池；
-// Go 无法字节级复刻 Python hash，但"稳定性"和"前缀池打散"两个不变量都保留：
-// 用 fnv64a(strings.Join(names, "\x00")) 作 seed 喂 math/rand.New。
-// 字节级不同不影响上游判定（Anthropic 不会验证我们的随机种子算法）。
-func buildDynamicToolMap(toolNames []string) map[string]string {
-	if len(toolNames) <= dynamicToolMapThreshold {
-		return nil
-	}
-	h := fnv.New64a()
-	for i, n := range toolNames {
-		if i > 0 {
-			_, _ = h.Write([]byte{0})
-		}
-		_, _ = h.Write([]byte(n))
-	}
-	rng := rand.New(rand.NewSource(int64(h.Sum64())))
-
-	available := make([]string, len(fakeToolNamePrefixes))
-	copy(available, fakeToolNamePrefixes)
-	rng.Shuffle(len(available), func(i, j int) { available[i], available[j] = available[j], available[i] })
-
-	mapping := make(map[string]string, len(toolNames))
-	for i, name := range toolNames {
-		prefix := available[i%len(available)]
-		headLen := 3
-		if len(name) < 3 {
-			headLen = len(name)
-		}
-		fake := fmt.Sprintf("%s%s%02d", prefix, name[:headLen], i)
-		mapping[name] = fake
-	}
-	return mapping
-}
-
-// sanitizeToolName 把真名转成假名。
-// 与 Parrot _sanitize_tool_name 语义一致：动态映射优先，再走静态前缀映射。
-func sanitizeToolName(name string, dynamic map[string]string) string {
-	if dynamic != nil {
-		if fake, ok := dynamic[name]; ok {
-			return fake
-		}
-	}
-	for prefix, replacement := range staticToolNameRewrites {
-		if strings.HasPrefix(name, prefix) {
-			return replacement + name[len(prefix):]
-		}
-	}
-	return name
-}
-
 // shouldMimicToolName 指示某个 tool 是否需要重命名。
 // server tool（type != "" 且不是 "function" / "custom"）是 Anthropic 协议语义的一部分，
 // 比如 "web_search_20250305" / "computer_20250124"；误改会导致上游拒绝。
@@ -115,8 +64,90 @@ func shouldMimicToolName(toolType string) bool {
 	return false
 }
 
+func buildKnownToolTitleCaseMap(mimicableNames, allToolNames []string, occupied map[string]struct{}) map[string]string {
+	if len(mimicableNames) == 0 {
+		return nil
+	}
+
+	groups := make(map[string][]string)
+	seen := make(map[string]struct{})
+	for _, name := range mimicableNames {
+		target, ok := knownToolTitleCaseRewrites[name]
+		if !ok || target == name {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		groups[target] = append(groups[target], name)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+
+	toolSetKey := stableToolSetKey(allToolNames)
+	targets := make([]string, 0, len(groups))
+	for target := range groups {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+
+	mapping := make(map[string]string)
+	for _, target := range targets {
+		originals := groups[target]
+		sort.Strings(originals)
+		_, targetOccupied := occupied[target]
+		suffixAll := targetOccupied || len(originals) > 1
+		for i, original := range originals {
+			fake := target
+			if suffixAll || i > 0 {
+				fake = uniqueToolNameWithSuffix(target, original, toolSetKey, occupied)
+			}
+			mapping[original] = fake
+			occupied[fake] = struct{}{}
+		}
+	}
+	return mapping
+}
+
+func stableToolSetKey(names []string) string {
+	seen := make(map[string]struct{}, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, name)
+	}
+	sort.Strings(unique)
+	return strings.Join(unique, "\x00")
+}
+
+func uniqueToolNameWithSuffix(base, original, toolSetKey string, occupied map[string]struct{}) string {
+	for attempt := 0; ; attempt++ {
+		candidate := base + toolNameCollisionSuffix(original, toolSetKey, attempt)
+		if _, exists := occupied[candidate]; !exists {
+			return candidate
+		}
+	}
+}
+
+func toolNameCollisionSuffix(original, toolSetKey string, attempt int) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(original))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(toolSetKey))
+	if attempt > 0 {
+		_, _ = h.Write([]byte{0})
+		_, _ = fmt.Fprintf(h, "%d", attempt)
+	}
+	return fmt.Sprintf("_%06x", h.Sum32()&0xffffff)
+}
+
 // buildToolNameRewriteFromBody 扫描 body 的 tools[*].name，构造 ToolNameRewrite
-// 并返回它。若不需要混淆（tools 数量不足 + 没有匹配静态前缀的工具）返回 nil。
+// 并返回它。主路径只把已知/官方工具名改成 Claude Code TitleCase；未知工具保持不变。
 //
 // 注意：只扫描，不改 body。真正的 body 改写在 applyToolNameRewriteToBody。
 func buildToolNameRewriteFromBody(body []byte) *ToolNameRewrite {
@@ -126,26 +157,35 @@ func buildToolNameRewriteFromBody(body []byte) *ToolNameRewrite {
 	}
 
 	mimicableNames := make([]string, 0)
+	allToolNames := make([]string, 0)
+	occupiedNames := make(map[string]struct{})
 	toolsArr := tools.Array()
 	for _, t := range toolsArr {
-		if !shouldMimicToolName(t.Get("type").String()) {
-			continue
-		}
 		name := t.Get("name").String()
 		if name == "" {
 			continue
 		}
+		allToolNames = append(allToolNames, name)
+		if !shouldMimicToolName(t.Get("type").String()) {
+			occupiedNames[name] = struct{}{}
+			continue
+		}
 		mimicableNames = append(mimicableNames, name)
+		if target, ok := knownToolTitleCaseRewrites[name]; !ok || target == name {
+			occupiedNames[name] = struct{}{}
+		}
 	}
 
-	dynamic := buildDynamicToolMap(mimicableNames)
+	titleCaseMap := buildKnownToolTitleCaseMap(mimicableNames, allToolNames, occupiedNames)
+	if len(titleCaseMap) == 0 {
+		return nil
+	}
 
 	rw := &ToolNameRewrite{
 		Forward: make(map[string]string),
 		Reverse: make(map[string]string),
 	}
-	for _, name := range mimicableNames {
-		fake := sanitizeToolName(name, dynamic)
+	for name, fake := range titleCaseMap {
 		if fake == name {
 			continue
 		}
@@ -161,6 +201,9 @@ func buildToolNameRewriteFromBody(body []byte) *ToolNameRewrite {
 		rw.ReverseOrdered = append(rw.ReverseOrdered, [2]string{fake, real})
 	}
 	sort.SliceStable(rw.ReverseOrdered, func(i, j int) bool {
+		if len(rw.ReverseOrdered[i][0]) == len(rw.ReverseOrdered[j][0]) {
+			return rw.ReverseOrdered[i][0] < rw.ReverseOrdered[j][0]
+		}
 		return len(rw.ReverseOrdered[i][0]) > len(rw.ReverseOrdered[j][0])
 	})
 
