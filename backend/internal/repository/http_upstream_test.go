@@ -146,6 +146,27 @@ func (s *HTTPUpstreamSuite) TestOpenAIProfileHTTP2DisabledUsesHTTP1Transport() {
 	require.Equal(s.T(), upstreamProtocolModeOpenAIH1, entry.protocolMode)
 }
 
+func (s *HTTPUpstreamSuite) TestHTTPUpstreamDefaultProfileDoesNotForceHTTP2OrTLSFingerprintDialer() {
+	svc := s.newService()
+	entry, err := svc.getClientEntry("", 1, 1, service.HTTPUpstreamProfileDefault, false, false)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), upstreamProtocolModeDefault, entry.protocolMode)
+
+	transport, ok := entry.client.Transport.(*http.Transport)
+	require.True(s.T(), ok, "expected *http.Transport")
+	require.False(s.T(), transport.ForceAttemptHTTP2)
+	require.Nil(s.T(), transport.TLSNextProto)
+	require.Nil(s.T(), transport.DialTLSContext)
+}
+
+func (s *HTTPUpstreamSuite) TestHTTPUpstreamCacheKeyRemainsIsolationBasedNotHostOnly() {
+	require.Equal(s.T(), "proxy:direct", buildCacheKey("", directProxyKey, 1, upstreamProtocolModeDefault))
+	require.Equal(s.T(), "proxy:direct", buildCacheKey("", directProxyKey, 2, upstreamProtocolModeDefault))
+	require.Equal(s.T(), "account:17", buildCacheKey(config.ConnectionPoolIsolationAccount, directProxyKey, 17, upstreamProtocolModeDefault))
+	require.Equal(s.T(), "account:17|proxy:direct", buildCacheKey(config.ConnectionPoolIsolationAccountProxy, directProxyKey, 17, upstreamProtocolModeDefault))
+	require.Equal(s.T(), "proxy:direct|proto:openai_h2", buildCacheKey("", directProxyKey, 1, upstreamProtocolModeOpenAIH2))
+}
+
 func (s *HTTPUpstreamSuite) TestOpenAIHeaderTimeoutChangeRebuildsClient() {
 	s.cfg.Gateway = config.GatewayConfig{
 		OpenAIHTTP2: config.GatewayOpenAIHTTP2Config{Enabled: true},
