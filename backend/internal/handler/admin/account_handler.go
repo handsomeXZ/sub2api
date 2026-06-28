@@ -95,41 +95,43 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
-	Name                    string         `json:"name" binding:"required"`
-	Notes                   *string        `json:"notes"`
-	Platform                string         `json:"platform" binding:"required"`
-	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials" binding:"required"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             int            `json:"concurrency"`
-	Priority                int            `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	GroupIDs                []int64        `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                                   string         `json:"name" binding:"required"`
+	Notes                                  *string        `json:"notes"`
+	Platform                               string         `json:"platform" binding:"required"`
+	Type                                   string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials                            map[string]any `json:"credentials" binding:"required"`
+	Extra                                  map[string]any `json:"extra"`
+	ClaudeCodeIdentityImpersonationEnabled *bool          `json:"claude_code_identity_impersonation_enabled"`
+	ProxyID                                *int64         `json:"proxy_id"`
+	Concurrency                            int            `json:"concurrency"`
+	Priority                               int            `json:"priority"`
+	RateMultiplier                         *float64       `json:"rate_multiplier"`
+	LoadFactor                             *int           `json:"load_factor"`
+	GroupIDs                               []int64        `json:"group_ids"`
+	ExpiresAt                              *int64         `json:"expires_at"`
+	AutoPauseOnExpired                     *bool          `json:"auto_pause_on_expired"`
+	ConfirmMixedChannelRisk                *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // UpdateAccountRequest represents update account request
 // 使用指针类型来区分"未提供"和"设置为0"
 type UpdateAccountRequest struct {
-	Name                    string         `json:"name"`
-	Notes                   *string        `json:"notes"`
-	Type                    string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	Concurrency             *int           `json:"concurrency"`
-	Priority                *int           `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	Status                  string         `json:"status" binding:"omitempty,oneof=active inactive error"`
-	GroupIDs                *[]int64       `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                                   string         `json:"name"`
+	Notes                                  *string        `json:"notes"`
+	Type                                   string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials                            map[string]any `json:"credentials"`
+	Extra                                  map[string]any `json:"extra"`
+	ClaudeCodeIdentityImpersonationEnabled *bool          `json:"claude_code_identity_impersonation_enabled"`
+	ProxyID                                *int64         `json:"proxy_id"`
+	Concurrency                            *int           `json:"concurrency"`
+	Priority                               *int           `json:"priority"`
+	RateMultiplier                         *float64       `json:"rate_multiplier"`
+	LoadFactor                             *int           `json:"load_factor"`
+	Status                                 string         `json:"status" binding:"omitempty,oneof=active inactive error"`
+	GroupIDs                               *[]int64       `json:"group_ids"`
+	ExpiresAt                              *int64         `json:"expires_at"`
+	AutoPauseOnExpired                     *bool          `json:"auto_pause_on_expired"`
+	ConfirmMixedChannelRisk                *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
@@ -177,6 +179,18 @@ type AccountWithConcurrency struct {
 }
 
 const accountListGroupUngroupedQueryValue = "ungrouped"
+const claudeCodeIdentityImpersonationEnabledKey = "claude_code_identity_impersonation_enabled"
+
+func applyClaudeCodeIdentityImpersonationExtra(extra map[string]any, enabled *bool) map[string]any {
+	if enabled == nil {
+		return extra
+	}
+	if extra == nil {
+		extra = make(map[string]any, 1)
+	}
+	extra[claudeCodeIdentityImpersonationEnabledKey] = *enabled
+	return extra
+}
 
 func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, account *service.Account) AccountWithConcurrency {
 	item := AccountWithConcurrency{
@@ -522,6 +536,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
 	}
+	req.Extra = applyClaudeCodeIdentityImpersonationExtra(req.Extra, req.ClaudeCodeIdentityImpersonationEnabled)
 	// base_rpm 输入校验：负值归零，超过 10000 截断
 	sanitizeExtraBaseRPM(req.Extra)
 
@@ -605,6 +620,19 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	if req.RateMultiplier != nil && *req.RateMultiplier < 0 {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
+	}
+	req.Extra = applyClaudeCodeIdentityImpersonationExtra(req.Extra, req.ClaudeCodeIdentityImpersonationEnabled)
+	if req.ClaudeCodeIdentityImpersonationEnabled == nil && req.Extra != nil {
+		existingAccount, getErr := h.adminService.GetAccount(c.Request.Context(), accountID)
+		if getErr != nil {
+			response.ErrorFrom(c, getErr)
+			return
+		}
+		if existingAccount != nil && existingAccount.Type == service.AccountTypeUpstream && existingAccount.Extra != nil {
+			if enabled, ok := existingAccount.Extra[claudeCodeIdentityImpersonationEnabledKey].(bool); ok {
+				req.Extra[claudeCodeIdentityImpersonationEnabledKey] = enabled
+			}
+		}
 	}
 	// base_rpm 输入校验：负值归零，超过 10000 截断
 	sanitizeExtraBaseRPM(req.Extra)

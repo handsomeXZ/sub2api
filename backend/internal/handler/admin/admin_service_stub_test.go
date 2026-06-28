@@ -20,6 +20,7 @@ type stubAdminService struct {
 	boundAuthIdentity    *service.AdminBindAuthIdentityInput
 	boundAuthIdentityFor int64
 	createdAccounts      []*service.CreateAccountInput
+	updatedAccounts      []*service.UpdateAccountInput
 	createdProxies       []*service.CreateProxyInput
 	updatedProxyIDs      []int64
 	updatedProxies       []*service.UpdateProxyInput
@@ -85,7 +86,7 @@ func newStubAdminService() *stubAdminService {
 	apiKey := service.APIKey{
 		ID:        10,
 		UserID:    user.ID,
-		Key:       "sk-test",
+		Key:       "user-key-placeholder",
 		Name:      "test",
 		Status:    service.StatusActive,
 		CreatedAt: now,
@@ -332,6 +333,12 @@ func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int,
 }
 
 func (s *stubAdminService) GetAccount(ctx context.Context, id int64) (*service.Account, error) {
+	for i := range s.accounts {
+		if s.accounts[i].ID == id {
+			account := s.accounts[i]
+			return &account, nil
+		}
+	}
 	account := service.Account{ID: id, Name: "account", Status: service.StatusActive}
 	return &account, nil
 }
@@ -352,15 +359,36 @@ func (s *stubAdminService) CreateAccount(ctx context.Context, input *service.Cre
 	if s.createAccountErr != nil {
 		return nil, s.createAccountErr
 	}
-	account := service.Account{ID: 300, Name: input.Name, Status: service.StatusActive}
+	account := service.Account{ID: 300, Name: input.Name, Platform: input.Platform, Type: input.Type, Extra: input.Extra, Status: service.StatusActive}
+	s.accounts = append(s.accounts, account)
 	return &account, nil
 }
 
 func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *service.UpdateAccountInput) (*service.Account, error) {
+	s.mu.Lock()
+	s.updatedAccounts = append(s.updatedAccounts, input)
+	s.mu.Unlock()
 	if s.updateAccountErr != nil {
 		return nil, s.updateAccountErr
 	}
 	account := service.Account{ID: id, Name: input.Name, Status: service.StatusActive}
+	for i := range s.accounts {
+		if s.accounts[i].ID != id {
+			continue
+		}
+		account = s.accounts[i]
+		if input.Name != "" {
+			account.Name = input.Name
+		}
+		if input.Type != "" {
+			account.Type = input.Type
+		}
+		if input.Extra != nil {
+			account.Extra = input.Extra
+		}
+		s.accounts[i] = account
+		return &account, nil
+	}
 	return &account, nil
 }
 
