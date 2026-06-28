@@ -6,6 +6,7 @@
 import { apiClient } from '../client'
 import type {
   Account,
+  AccountExtra,
   CreateAccountRequest,
   UpdateAccountRequest,
   PaginatedResponse,
@@ -218,7 +219,7 @@ export async function applyOAuthCredentials(
   payload: {
     type: 'oauth' | 'setup-token'
     credentials: Record<string, unknown>
-    extra?: Record<string, unknown>
+    extra?: AccountExtra
   }
 ): Promise<Account> {
   const { data } = await apiClient.post<Account>(

@@ -830,10 +830,8 @@ export interface Account {
   credentials?: Record<string, unknown>
   credentials_status?: Record<string, boolean>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
-  extra?: (CodexUsageSnapshot & OpenAICompactState & {
-    model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
-    antigravity_credits_overages?: Record<string, { activated_at: string; active_until: string }>
-  } & Record<string, unknown>)
+  extra?: AccountExtra
+  claude_code_identity_impersonation_enabled?: boolean | null
   proxy_id: number | null
   proxy_fallback_origin_id?: number | null
   proxy_fallback_origin_name?: string | null
@@ -1021,13 +1019,21 @@ export interface OpenAIResponsesState {
   openai_responses_supported?: boolean
 }
 
+export interface AccountExtra extends CodexUsageSnapshot, OpenAICompactState {
+  model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+  antigravity_credits_overages?: Record<string, { activated_at: string; active_until: string }>
+  claude_code_identity_impersonation_enabled?: boolean
+  [key: string]: unknown
+}
+
 export interface CreateAccountRequest {
   name: string
   notes?: string | null
   platform: AccountPlatform
   type: AccountType
   credentials: Record<string, unknown>
-  extra?: Record<string, unknown>
+  extra?: AccountExtra
+  claude_code_identity_impersonation_enabled?: boolean
   proxy_id?: number | null
   concurrency?: number
   load_factor?: number | null
@@ -1044,7 +1050,8 @@ export interface UpdateAccountRequest {
   notes?: string | null
   type?: AccountType
   credentials?: Record<string, unknown>
-  extra?: Record<string, unknown>
+  extra?: AccountExtra
+  claude_code_identity_impersonation_enabled?: boolean
   proxy_id?: number | null
   concurrency?: number
   load_factor?: number | null
@@ -1130,7 +1137,7 @@ export interface AdminDataAccount {
   platform: AccountPlatform
   type: AccountType
   credentials: Record<string, unknown>
-  extra?: Record<string, unknown>
+  extra?: AccountExtra
   proxy_key?: string | null
   concurrency: number
   priority: number
