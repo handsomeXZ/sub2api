@@ -61,6 +61,39 @@ func TestHandleResponsesBufferedStreamingResponse_PreservesMessageStartCacheUsag
 	require.Contains(t, rec.Body.String(), `"cached_tokens":9`)
 }
 
+func TestHandleResponsesBufferedStreamingResponse_RestoresToolNamesFromRequestContext(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	rw := buildToolNameRewriteFromBody([]byte(`{"tools":[{"name":"bash","input_schema":{}}]}`))
+	require.NotNil(t, rw)
+	c.Set(toolNameRewriteKey, rw)
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_responses_buffered_tool_restore"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_tool","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":1}}}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+			``,
+		}, "\n"))),
+	}
+
+	svc := &GatewayService{}
+	result, err := svc.handleResponsesBufferedStreamingResponse(resp, c, "gpt-5", "claude-sonnet-4.5", nil, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), `"name":"bash"`)
+	require.NotContains(t, rec.Body.String(), `"name":"Bash"`)
+}
+
 func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -94,5 +127,42 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	require.Equal(t, 8, result.Usage.OutputTokens)
 	require.Equal(t, 11, result.Usage.CacheReadInputTokens)
 	require.Equal(t, 4, result.Usage.CacheCreationInputTokens)
+	require.Contains(t, rec.Body.String(), `response.completed`)
+}
+
+func TestHandleResponsesStreamingResponse_RestoresToolNamesFromRequestContext(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	rw := buildToolNameRewriteFromBody([]byte(`{"tools":[{"name":"bash","input_schema":{}}]}`))
+	require.NotNil(t, rw)
+	c.Set(toolNameRewriteKey, rw)
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_responses_stream_tool_restore"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_tool_stream","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":"","usage":{"input_tokens":1}}}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n"))),
+	}
+
+	svc := &GatewayService{}
+	result, err := svc.handleResponsesStreamingResponse(resp, c, "gpt-5", "claude-sonnet-4.5", nil, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), `"name":"bash"`)
+	require.NotContains(t, rec.Body.String(), `"name":"Bash"`)
 	require.Contains(t, rec.Body.String(), `response.completed`)
 }

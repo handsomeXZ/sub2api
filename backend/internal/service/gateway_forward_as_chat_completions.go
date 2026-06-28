@@ -15,7 +15,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -61,7 +60,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	// 4. Model mapping
 	mappedModel := originalModel
-	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+	if s.isAnthropicAPIKeyCredentialAccount(account) || account.Type == AccountTypeServiceAccount {
 		mappedModel = account.GetMappedModel(originalModel)
 	}
 	if mappedModel == originalModel && account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount {
@@ -69,7 +68,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 		if normalized != originalModel {
 			mappedModel = normalized
 		}
-	} else if mappedModel == originalModel && account.Platform == PlatformAnthropic && account.Type != AccountTypeAPIKey {
+	} else if mappedModel == originalModel && account.Platform == PlatformAnthropic && !s.isAnthropicAPIKeyCredentialAccount(account) {
 		normalized := claude.NormalizeModelID(originalModel)
 		if normalized != originalModel {
 			mappedModel = normalized
@@ -90,16 +89,27 @@ func (s *GatewayService) ForwardAsChatCompletions(
 		return nil, fmt.Errorf("marshal anthropic request: %w", err)
 	}
 
-	// 6. Apply Claude Code mimicry for OAuth accounts.
+	// 6. Apply Claude Code mimicry.
 	// Chat Completions 协议进来的请求永远不是 Claude Code 客户端，所以对 OAuth 账号
 	// 必须完整执行 /v1/messages 主路径上的伪装链路（system 重写 + normalize + metadata 注入），
 	// 否则会被 Anthropic 判为第三方应用并扣 extra usage。
 	// 见 applyClaudeCodeOAuthMimicryToBody 的 godoc。
 	isClaudeCode := false
-	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
+	shouldMimicClaudeCodeOAuth := account.IsOAuth() && !isClaudeCode
+	shouldImpersonateClaudeCodeAPIKey := s.shouldImpersonateClaudeCodeAPIKey(account)
+	shouldMimicClaudeCode := shouldMimicClaudeCodeOAuth || shouldImpersonateClaudeCodeAPIKey
 
-	if shouldMimicClaudeCode {
+	if shouldMimicClaudeCodeOAuth {
 		anthropicBody = s.applyClaudeCodeOAuthMimicryToBody(ctx, c, account, anthropicBody, anthropicReq.System, mappedModel)
+	}
+	if shouldImpersonateClaudeCodeAPIKey {
+		anthropicBody, err = s.applyClaudeCodeAPIKeyImpersonationToBody(ctx, c, account, anthropicBody, anthropicReq.System, mappedModel, parsed)
+		if err != nil {
+			return nil, fmt.Errorf("apply claude code identity impersonation: %w", err)
+		}
+		if normalizedModel := strings.TrimSpace(gjson.GetBytes(anthropicBody, "model").String()); normalizedModel != "" {
+			mappedModel = normalizedModel
+		}
 	}
 
 	// 7. Enforce cache_control block limit
@@ -320,7 +330,7 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 	ccResp := apicompat.ResponsesToChatCompletions(responsesResp, originalModel)
 
 	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		writeFilteredResponseHeadersForContext(c, resp.Header, s.responseHeaderFilter)
 	}
 	// 非流式响应必须是 application/json。上游被强制流式后会返回
 	// Content-Type: text/event-stream，经 WriteFilteredHeaders 透传后会污染
@@ -362,7 +372,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	requestID := resp.Header.Get("x-request-id")
 
 	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		writeFilteredResponseHeadersForContext(c, resp.Header, s.responseHeaderFilter)
 	}
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
