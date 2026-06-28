@@ -1,14 +1,20 @@
 package service
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 // NewMetadataFormatMinVersion is the minimum Claude Code version that uses
 // JSON-formatted metadata.user_id instead of the legacy concatenated string.
 const NewMetadataFormatMinVersion = "2.1.78"
+
+const claudeCodeAPIKeyMetadataIdentityDerivationKey = "sub2api:claude-code-apikey-metadata-user-id:v1"
 
 // ParsedUserID represents the components extracted from a metadata.user_id value.
 type ParsedUserID struct {
@@ -73,15 +79,72 @@ func ParseMetadataUserID(raw string) *ParsedUserID {
 // (not necessarily the originals).
 func FormatMetadataUserID(deviceID, accountUUID, sessionID, uaVersion string) string {
 	if IsNewMetadataFormatVersion(uaVersion) {
-		b, _ := json.Marshal(jsonUserID{
-			DeviceID:    deviceID,
-			AccountUUID: accountUUID,
-			SessionID:   sessionID,
-		})
-		return string(b)
+		return FormatMetadataUserIDJSON(deviceID, accountUUID, sessionID)
 	}
 	// Legacy format
 	return "user_" + deviceID + "_account_" + accountUUID + "_session_" + sessionID
+}
+
+// FormatMetadataUserIDJSON always builds the SAZ-style JSON metadata.user_id string.
+func FormatMetadataUserIDJSON(deviceID, accountUUID, sessionID string) string {
+	b, _ := json.Marshal(jsonUserID{
+		DeviceID:    deviceID,
+		AccountUUID: accountUUID,
+		SessionID:   sessionID,
+	})
+	return string(b)
+}
+
+// FormatClaudeCodeAPIKeyImpersonationMetadataUserID builds metadata.user_id for
+// Claude Code APIKey impersonation. It intentionally ignores CLI UA version so
+// this impersonation path never emits the legacy concatenated format.
+func FormatClaudeCodeAPIKeyImpersonationMetadataUserID(account *Account, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if account == nil || sessionID == "" {
+		return ""
+	}
+
+	deviceID := claudeCodeAPIKeyMetadataIdentityHex(account, "device_id")
+	accountUUID := uuidFromDigest(claudeCodeAPIKeyMetadataIdentityDigest(account, "account_uuid"))
+	if deviceID == "" || accountUUID == "" {
+		return ""
+	}
+	return FormatMetadataUserIDJSON(deviceID, accountUUID, sessionID)
+}
+
+func claudeCodeAPIKeyMetadataIdentityHex(account *Account, purpose string) string {
+	return hex.EncodeToString(claudeCodeAPIKeyMetadataIdentityDigest(account, purpose))
+}
+
+func claudeCodeAPIKeyMetadataIdentityDigest(account *Account, purpose string) []byte {
+	digest := hmac.New(sha256.New, []byte(claudeCodeAPIKeyMetadataIdentityDerivationKey))
+	writeMetadataIdentityPart := func(name, value string) {
+		_, _ = digest.Write([]byte(name))
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+
+	writeMetadataIdentityPart("purpose", purpose)
+	writeMetadataIdentityPart("account_id", strconv.FormatInt(account.ID, 10))
+	writeMetadataIdentityPart("platform", account.Platform)
+	writeMetadataIdentityPart("type", account.Type)
+	writeMetadataIdentityPart("base_url", claudeCodeAPIKeyMetadataIdentityBaseURL(account))
+	writeMetadataIdentityPart("claude_user_id", account.GetClaudeUserID())
+	writeMetadataIdentityPart("account_uuid", account.GetExtraString("account_uuid"))
+
+	return digest.Sum(nil)
+}
+
+func claudeCodeAPIKeyMetadataIdentityBaseURL(account *Account) string {
+	baseURL := strings.TrimSpace(account.GetCredential("base_url"))
+	if baseURL == "" && account.Type == AccountTypeAPIKey {
+		baseURL = account.GetBaseURL()
+	}
+	if baseURL == "" && account.Platform == PlatformAnthropic {
+		baseURL = "https://api.anthropic.com"
+	}
+	return strings.TrimRight(baseURL, "/")
 }
 
 // IsNewMetadataFormatVersion returns true if the given CLI version uses the
