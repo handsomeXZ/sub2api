@@ -1078,8 +1078,20 @@ func (s *GatewayService) replaceModelInBody(body []byte, newModel string) []byte
 type claudeOAuthNormalizeOptions struct {
 	injectMetadata          bool
 	metadataUserID          string
+	overwriteMetadataUserID bool
 	stripSystemCacheControl bool
+	skipTemperatureDefault  bool
+	fillThinkingDefault     bool
+	defaultMaxTokens        int
+	forceMaxTokensDefault   bool
 }
+
+const (
+	claudeOAuthDefaultMaxTokens                   = 128000
+	claudeCodeAPIKeyImpersonationDefaultMaxTokens = 64000
+	claudeCodeDefaultThinkingBody                 = `{"type":"adaptive"}`
+	claudeCodeDefaultContextManagementBody        = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
+)
 
 // sanitizeSystemText rewrites only the fixed OpenCode identity sentence (if present).
 // We intentionally avoid broad keyword replacement in system prompts to prevent
@@ -1289,25 +1301,41 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 	}
 
 	if opts.injectMetadata && opts.metadataUserID != "" {
-		if next, changed := ensureClaudeOAuthMetadataUserID(out, opts.metadataUserID); changed {
+		if opts.overwriteMetadataUserID {
+			if next, ok := setJSONValueBytes(out, "metadata.user_id", opts.metadataUserID); ok {
+				out = next
+				modified = true
+			}
+		} else if next, changed := ensureClaudeOAuthMetadataUserID(out, opts.metadataUserID); changed {
 			out = next
 			modified = true
 		}
 	}
 
-	// temperature：真实 Claude Code CLI 总是发送 temperature（默认 1，客户端可覆盖）。
-	// 之前的实现直接 delete 会导致 payload 缺字段，与真实 CLI 字节级不一致。
-	// 策略：客户端传了什么就透传；没传则补默认 1。
-	if !gjson.GetBytes(out, "temperature").Exists() {
+	// temperature：OAuth mimicry 沿用既有默认 1 行为；API-key identity
+	// impersonation 会跳过该默认值，仅补齐本任务收敛后的 body defaults。
+	if !opts.skipTemperatureDefault && !gjson.GetBytes(out, "temperature").Exists() {
 		if next, ok := setJSONValueBytes(out, "temperature", 1); ok {
 			out = next
 			modified = true
 		}
 	}
 
-	// max_tokens：真实 CLI 的默认值是 128000。缺失时补齐以对齐指纹。
-	if !gjson.GetBytes(out, "max_tokens").Exists() {
-		if next, ok := setJSONValueBytes(out, "max_tokens", 128000); ok {
+	// max_tokens：缺失时补齐；OpenAI 兼容协议转换可能先写入 Anthropic
+	// schema 的内部默认值，此时由调用方用 forceMaxTokensDefault 表示客户端未显式提供。
+	maxTokensDefault := opts.defaultMaxTokens
+	if maxTokensDefault <= 0 {
+		maxTokensDefault = claudeOAuthDefaultMaxTokens
+	}
+	if opts.forceMaxTokensDefault || !gjson.GetBytes(out, "max_tokens").Exists() {
+		if next, ok := setJSONValueBytes(out, "max_tokens", maxTokensDefault); ok {
+			out = next
+			modified = true
+		}
+	}
+
+	if opts.fillThinkingDefault && !gjson.GetBytes(out, "thinking").Exists() {
+		if next, ok := setJSONRawBytes(out, "thinking", []byte(claudeCodeDefaultThinkingBody)); ok {
 			out = next
 			modified = true
 		}
@@ -1325,8 +1353,7 @@ func normalizeClaudeOAuthRequestBody(body []byte, modelID string, opts claudeOAu
 	if !gjson.GetBytes(out, "context_management").Exists() {
 		thinkingType := gjson.GetBytes(out, "thinking.type").String()
 		if thinkingType == "enabled" || thinkingType == "adaptive" {
-			const cmDefault = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
-			if next, ok := setJSONRawBytes(out, "context_management", []byte(cmDefault)); ok {
+			if next, ok := setJSONRawBytes(out, "context_management", []byte(claudeCodeDefaultContextManagementBody)); ok {
 				out = next
 				modified = true
 			}
@@ -1511,6 +1538,192 @@ func (s *GatewayService) buildOAuthMetadataUserIDFromBody(
 	}
 	accountUUID := strings.TrimSpace(account.GetExtraString("account_uuid"))
 	return FormatMetadataUserID(userID, accountUUID, sessionID, uaVersion)
+}
+
+const (
+	claudeCodeIdentityImpersonationSessionIDKey     = "claude_code_identity_impersonation_session_id"
+	claudeCodeAPIKeyImpersonationResponseHeadersKey = "claude_code_apikey_impersonation_response_headers"
+)
+
+func (s *GatewayService) shouldImpersonateClaudeCodeAPIKey(account *Account) bool {
+	return account != nil && account.Platform == PlatformAnthropic && account.IsClaudeCodeIdentityImpersonationEnabled()
+}
+
+func (s *GatewayService) isAnthropicUpstreamAPIKeyAccount(account *Account) bool {
+	return account != nil && account.Platform == PlatformAnthropic && account.Type == AccountTypeUpstream
+}
+
+func (s *GatewayService) isAnthropicAPIKeyCredentialAccount(account *Account) bool {
+	if account == nil || account.Platform != PlatformAnthropic {
+		return false
+	}
+	return account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream
+}
+
+func (s *GatewayService) anthropicAPIKeyCredentialBaseURL(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if account.Type == AccountTypeAPIKey {
+		return account.GetBaseURL()
+	}
+	if s.isAnthropicUpstreamAPIKeyAccount(account) {
+		if baseURL := strings.TrimSpace(account.GetCredential("base_url")); baseURL != "" {
+			return baseURL
+		}
+		return "https://api.anthropic.com"
+	}
+	return ""
+}
+
+func (s *GatewayService) applyClaudeCodeAPIKeyImpersonationSessionHeader(c *gin.Context, req *http.Request) {
+	if c == nil || req == nil {
+		return
+	}
+	if raw, ok := c.Get(claudeCodeIdentityImpersonationSessionIDKey); ok {
+		if sessionID, ok := raw.(string); ok && strings.TrimSpace(sessionID) != "" {
+			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", sessionID)
+		}
+	}
+}
+
+func claudeCodeAPIKeyImpersonationClientHasExplicitMaxTokens(parsed *ParsedRequest) bool {
+	if parsed == nil || parsed.Body == nil {
+		return false
+	}
+	body := parsed.Body.Bytes()
+	switch parsed.protocol {
+	case "responses":
+		return gjson.GetBytes(body, "max_output_tokens").Exists()
+	case "chat_completions":
+		return gjson.GetBytes(body, "max_tokens").Exists() || gjson.GetBytes(body, "max_completion_tokens").Exists()
+	default:
+		return gjson.GetBytes(body, "max_tokens").Exists()
+	}
+}
+
+func claudeCodeAPIKeyImpersonationClientHasExplicitThinking(parsed *ParsedRequest) bool {
+	if parsed == nil || parsed.Body == nil {
+		return false
+	}
+	body := parsed.Body.Bytes()
+	switch parsed.protocol {
+	case "responses":
+		return gjson.GetBytes(body, "reasoning").Exists()
+	case "chat_completions":
+		return gjson.GetBytes(body, "reasoning_effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
+	default:
+		return gjson.GetBytes(body, "thinking").Exists()
+	}
+}
+
+func (s *GatewayService) applyClaudeCodeAPIKeyImpersonationToBody(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	systemRaw any,
+	model string,
+	parsed *ParsedRequest,
+) ([]byte, error) {
+	if !s.shouldImpersonateClaudeCodeAPIKey(account) {
+		return body, nil
+	}
+	if len(body) == 0 {
+		return nil, errors.New("claude code identity impersonation requires request body")
+	}
+	if c == nil || c.Request == nil {
+		return nil, errors.New("claude code identity impersonation requires request context")
+	}
+	if s.identityService == nil {
+		return nil, errors.New("claude code identity impersonation requires identity service")
+	}
+	nativeClaudeCodeRequest := isNativeClaudeCodeAPIKeyImpersonationRequest(c, parsed, body)
+
+	apiKeyID := int64(0)
+	if parsed != nil && parsed.SessionContext != nil {
+		apiKeyID = parsed.SessionContext.APIKeyID
+	}
+	session, ok := ResolveClaudeCodeSessionID(ClaudeCodeSessionIDInput{
+		APIKeyID: apiKeyID,
+		Headers:  c.Request.Header,
+		Body:     body,
+	})
+	if !ok || strings.TrimSpace(session.SessionID) == "" {
+		return nil, errors.New("claude code identity impersonation requires resolvable session id")
+	}
+	metadataSession, ok := ResolveClaudeCodeMetadataSessionID(ClaudeCodeSessionIDInput{
+		APIKeyID: apiKeyID,
+		Headers:  c.Request.Header,
+		Body:     body,
+	})
+	if !ok || strings.TrimSpace(metadataSession.SessionID) == "" {
+		return nil, errors.New("claude code identity impersonation requires resolvable metadata session id")
+	}
+
+	fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)
+	if err != nil {
+		return nil, fmt.Errorf("claude code identity impersonation fingerprint: %w", err)
+	}
+	if fp == nil || strings.TrimSpace(fp.ClientID) == "" {
+		return nil, errors.New("claude code identity impersonation requires fingerprint client id")
+	}
+
+	metadataUserID := FormatClaudeCodeAPIKeyImpersonationMetadataUserID(account, metadataSession.SessionID)
+	if metadataUserID == "" {
+		return nil, errors.New("claude code identity impersonation requires metadata user id")
+	}
+
+	systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
+	systemRewritten := false
+	if systemPromptInjectionEnabled && !nativeClaudeCodeRequest {
+		body = rewriteSystemForNonClaudeCodeWithSystemReminder(body, normalizeSystemParam(systemRaw), systemPrompt, systemPromptBlocks)
+		systemRewritten = true
+	}
+
+	hasOriginalBody := parsed != nil && parsed.Body != nil
+	normalizeOpts := claudeOAuthNormalizeOptions{
+		stripSystemCacheControl: !systemRewritten && !nativeClaudeCodeRequest,
+		injectMetadata:          true,
+		metadataUserID:          metadataUserID,
+		overwriteMetadataUserID: true,
+		skipTemperatureDefault:  true,
+		fillThinkingDefault:     !hasOriginalBody || !claudeCodeAPIKeyImpersonationClientHasExplicitThinking(parsed),
+		defaultMaxTokens:        claudeCodeAPIKeyImpersonationDefaultMaxTokens,
+		forceMaxTokensDefault:   hasOriginalBody && !claudeCodeAPIKeyImpersonationClientHasExplicitMaxTokens(parsed),
+	}
+	body, _ = normalizeClaudeOAuthRequestBody(body, model, normalizeOpts)
+	body = s.rewriteMessageCacheControlIfEnabled(ctx, body)
+
+	if rw := buildToolNameRewriteFromBody(body); rw != nil {
+		body = applyToolNameRewriteToBody(body, rw)
+		c.Set(toolNameRewriteKey, rw)
+	} else {
+		body = applyToolsLastCacheBreakpoint(body)
+	}
+
+	uid := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String())
+	parsedUID := ParseMetadataUserID(uid)
+	if parsedUID == nil || parsedUID.SessionID != metadataSession.SessionID {
+		return nil, errors.New("claude code identity impersonation failed to inject metadata session")
+	}
+	c.Set(claudeCodeIdentityImpersonationSessionIDKey, session.SessionID)
+	c.Set(claudeCodeAPIKeyImpersonationResponseHeadersKey, true)
+	return body, nil
+}
+
+func isNativeClaudeCodeAPIKeyImpersonationRequest(c *gin.Context, parsed *ParsedRequest, body []byte) bool {
+	if c == nil {
+		return false
+	}
+	metadataUserID := ""
+	if parsed != nil {
+		metadataUserID = parsed.MetadataUserID
+	}
+	if strings.TrimSpace(metadataUserID) == "" {
+		metadataUserID = gjson.GetBytes(body, "metadata.user_id").String()
+	}
+	return isClaudeCodeClient(c.GetHeader("User-Agent"), metadataUserID)
 }
 
 // buildStableSessionSeed 为伪装路径合成的 metadata.user_id session_id 生成"会话级稳定"种子。
@@ -3947,7 +4160,7 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 		return true
 	}
 	// OAuth/SetupToken 账号使用 Anthropic 标准映射（短ID → 长ID）
-	if account.Platform == PlatformAnthropic && account.Type != AccountTypeAPIKey {
+	if account.Platform == PlatformAnthropic && !s.isAnthropicAPIKeyCredentialAccount(account) {
 		if account.Type == AccountTypeServiceAccount {
 			requestedModel = normalizeVertexAnthropicModelID(claude.NormalizeModelID(requestedModel))
 		} else {
@@ -3965,6 +4178,15 @@ func (s *GatewayService) GetAccessToken(ctx context.Context, account *Account) (
 		// Both oauth and setup-token use OAuth token flow
 		return s.getOAuthToken(ctx, account)
 	case AccountTypeAPIKey:
+		apiKey := account.GetCredential("api_key")
+		if apiKey == "" {
+			return "", "", errors.New("api_key not found in credentials")
+		}
+		return apiKey, "apikey", nil
+	case AccountTypeUpstream:
+		if account.Platform != PlatformAnthropic {
+			return "", "", fmt.Errorf("unsupported upstream account platform: %s", account.Platform)
+		}
 		apiKey := account.GetCredential("api_key")
 		if apiKey == "" {
 			return "", "", errors.New("api_key not found in credentials")
@@ -4424,24 +4646,9 @@ func ValidateClaudeOAuthSystemPromptBlocksConfig(raw string) error {
 
 func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expansionPrompt string, blocksConfig string) []byte {
 	system = normalizeSystemParam(system)
-	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
 
 	// 1. 提取原始 system prompt 文本
-	var originalSystemText string
-	switch v := system.(type) {
-	case string:
-		originalSystemText = strings.TrimSpace(v)
-	case []any:
-		var parts []string
-		for _, item := range v {
-			if m, ok := item.(map[string]any); ok {
-				if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
-					parts = append(parts, text)
-				}
-			}
-		}
-		originalSystemText = strings.Join(parts, "\n\n")
-	}
+	originalSystemText := originalSystemTextFromSystemParam(system)
 
 	// 2. 构造 system 数组，对齐真实 Claude Code CLI 的 3-block 形态：
 	//    [0] billing attribution block（cc_version={cliVer}.{fp}; cc_entrypoint=cli; cch=00000;）
@@ -4455,18 +4662,8 @@ func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expa
 	//    billing block 的 cch=00000 是占位符，会被 buildUpstreamRequest 里的
 	//    signBillingHeaderCCH 替换成 xxhash64 签名。缺失 billing block 的系统 payload
 	//    是 Anthropic 判定第三方的关键信号之一（真实 CLI 每个请求都带）。
-	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, blocksConfig)
-	if blockErr != nil {
-		logger.LegacyPrintf("service.gateway", "Warning: failed to build configured Claude OAuth system blocks: %v", blockErr)
-		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, "")
-	}
-	if blockErr != nil {
-		logger.LegacyPrintf("service.gateway", "Warning: failed to build default Claude OAuth system blocks: %v", blockErr)
-		return body
-	}
-	out, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(systemBlocks))
+	out, ok := replaceBodyWithClaudeCodeSystemPromptBlocks(body, expansionPrompt, blocksConfig)
 	if !ok {
-		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code system prompt")
 		return body
 	}
 
@@ -4507,6 +4704,161 @@ func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expa
 	}
 
 	return out
+}
+
+func rewriteSystemForNonClaudeCodeWithSystemReminder(body []byte, system any, expansionPrompt string, blocksConfig string) []byte {
+	system = normalizeSystemParam(system)
+	originalSystemText := originalSystemTextFromSystemParam(system)
+
+	out, ok := replaceBodyWithClaudeCodeSystemPromptBlocks(body, expansionPrompt, blocksConfig)
+	if !ok {
+		return body
+	}
+
+	ccPromptTrimmed := strings.TrimSpace(claudeCodeSystemPrompt)
+	if originalSystemText == "" || originalSystemText == ccPromptTrimmed || hasClaudeCodePrefix(originalSystemText) {
+		return out
+	}
+	return prependSystemReminderToFirstUserMessage(out, originalSystemText)
+}
+
+func originalSystemTextFromSystemParam(system any) string {
+	switch v := system.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	return ""
+}
+
+func replaceBodyWithClaudeCodeSystemPromptBlocks(body []byte, expansionPrompt string, blocksConfig string) ([]byte, bool) {
+	expansionPrompt = defaultClaudeOAuthExpansionPrompt(expansionPrompt)
+	systemBlocks, blockErr := buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, blocksConfig)
+	if blockErr != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build configured Claude OAuth system blocks: %v", blockErr)
+		systemBlocks, blockErr = buildClaudeOAuthSystemPromptBlocksJSON(body, expansionPrompt, "")
+	}
+	if blockErr != nil {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to build default Claude OAuth system blocks: %v", blockErr)
+		return body, false
+	}
+	out, ok := setJSONRawBytes(body, "system", buildJSONArrayRaw(systemBlocks))
+	if !ok {
+		logger.LegacyPrintf("service.gateway", "Warning: failed to set Claude Code system prompt")
+		return body, false
+	}
+	return out, true
+}
+
+func prependSystemReminderToFirstUserMessage(body []byte, originalSystemText string) []byte {
+	originalSystemText = strings.TrimSpace(originalSystemText)
+	if originalSystemText == "" {
+		return body
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+
+	reminderText := "<system-reminder>" + originalSystemText + "</system-reminder>"
+	out := body
+	messageIndex := -1
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		messageIndex++
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+		if userMessageContainsSystemReminder(msg) {
+			return false
+		}
+
+		content := msg.Get("content")
+		contentPath := fmt.Sprintf("messages.%d.content", messageIndex)
+		switch {
+		case content.Type == gjson.String:
+			if next, ok := setJSONValueBytes(out, contentPath, prependTextBlock(reminderText, content.String())); ok {
+				out = next
+			}
+		case content.IsArray():
+			if next, ok := prependSystemReminderToContentArray(out, contentPath, content, reminderText); ok {
+				out = next
+			}
+		default:
+			if next, ok := setJSONRawBytes(out, contentPath, buildJSONArrayRaw([][]byte{mustMarshalSystemReminderTextBlock(reminderText)})); ok {
+				out = next
+			}
+		}
+		return false
+	})
+	return out
+}
+
+func userMessageContainsSystemReminder(msg gjson.Result) bool {
+	content := msg.Get("content")
+	if content.Type == gjson.String {
+		return strings.Contains(content.String(), "<system-reminder>")
+	}
+	if !content.IsArray() {
+		return strings.Contains(msg.Raw, "<system-reminder>")
+	}
+	found := false
+	content.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "text" && strings.Contains(item.Get("text").String(), "<system-reminder>") {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func prependSystemReminderToContentArray(body []byte, contentPath string, content gjson.Result, reminderText string) ([]byte, bool) {
+	textIndex := -1
+	foundTextIndex := -1
+	existingText := ""
+	content.ForEach(func(_, item gjson.Result) bool {
+		textIndex++
+		if item.Get("type").String() == "text" && item.Get("text").Type == gjson.String {
+			foundTextIndex = textIndex
+			existingText = item.Get("text").String()
+			return false
+		}
+		return true
+	})
+	if foundTextIndex >= 0 {
+		return setJSONValueBytes(body, fmt.Sprintf("%s.%d.text", contentPath, foundTextIndex), prependTextBlock(reminderText, existingText))
+	}
+
+	items := [][]byte{mustMarshalSystemReminderTextBlock(reminderText)}
+	content.ForEach(func(_, item gjson.Result) bool {
+		items = append(items, []byte(item.Raw))
+		return true
+	})
+	return setJSONRawBytes(body, contentPath, buildJSONArrayRaw(items))
+}
+
+func prependTextBlock(prefix string, text string) string {
+	if strings.TrimSpace(text) == "" {
+		return prefix
+	}
+	return prefix + "\n\n" + text
+}
+
+func mustMarshalSystemReminderTextBlock(text string) []byte {
+	block, err := json.Marshal(map[string]any{"type": "text", "text": text})
+	if err != nil {
+		return []byte(`{"type":"text","text":""}`)
+	}
+	return block
 }
 
 type cacheControlPath struct {
@@ -4831,9 +5183,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	//
 	// 对于非 Claude Code 的第三方客户端（opencode 等），仍然走完整 mimicry。
 	isClaudeCode := IsClaudeCodeClient(ctx) || isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
-	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
+	shouldMimicClaudeCodeOAuth := account.IsOAuth() && !isClaudeCode
+	shouldImpersonateClaudeCodeAPIKey := s.shouldImpersonateClaudeCodeAPIKey(account)
+	shouldMimicClaudeCode := shouldMimicClaudeCodeOAuth || shouldImpersonateClaudeCodeAPIKey
 
-	if shouldMimicClaudeCode {
+	if shouldMimicClaudeCodeOAuth {
 		// 与 Parrot 对齐：OAuth 账号无条件重写 system（即使客户端已发了 Claude Code
 		// 风格的 system prompt）。原因：第三方工具（opencode 等）会发 "You are Claude
 		// Code..." system prompt 但缺少 billing attribution block，导致 Anthropic
@@ -4892,6 +5246,20 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			}
 		}
 	}
+	if shouldImpersonateClaudeCodeAPIKey {
+		systemRaw, _ := parsed.SystemValue()
+		impersonatedBody, err := s.applyClaudeCodeAPIKeyImpersonationToBody(ctx, c, account, body, systemRaw, reqModel, parsed)
+		if err != nil {
+			return nil, err
+		}
+		if err := replaceBody(impersonatedBody); err != nil {
+			return nil, err
+		}
+		if normalizedModel := strings.TrimSpace(gjson.GetBytes(body, "model").String()); normalizedModel != "" {
+			reqModel = normalizedModel
+			parsed.Model = normalizedModel
+		}
+	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）
 	if err := replaceBody(enforceCacheControlLimit(body)); err != nil {
@@ -4903,7 +5271,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// - OAuth/SetupToken 账号：使用 Anthropic 标准映射（短ID → 长ID）
 	mappedModel := reqModel
 	mappingSource := ""
-	if account.Type == AccountTypeAPIKey {
+	if s.isAnthropicAPIKeyCredentialAccount(account) {
 		mappedModel = account.GetMappedModel(reqModel)
 		if mappedModel != reqModel {
 			mappingSource = "account"
@@ -4921,7 +5289,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 			}
 		}
 	}
-	if mappingSource == "" && account.Platform == PlatformAnthropic && account.Type != AccountTypeAPIKey {
+	if mappingSource == "" && account.Platform == PlatformAnthropic && !s.isAnthropicAPIKeyCredentialAccount(account) {
 		normalized := claude.NormalizeModelID(reqModel)
 		if normalized != reqModel {
 			mappedModel = normalized
@@ -5834,7 +6202,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
 	}
 
-	writeAnthropicPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	writeAnthropicPassthroughResponseHeaders(c, resp.Header, s.responseHeaderFilter)
 
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {
@@ -6224,7 +6592,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 
 	usage := parseClaudeUsageFromResponseBody(body)
 
-	writeAnthropicPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	writeAnthropicPassthroughResponseHeaders(c, resp.Header, s.responseHeaderFilter)
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {
 		contentType = "application/json"
@@ -6234,12 +6602,16 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
 	return usage, nil
 }
 
-func writeAnthropicPassthroughResponseHeaders(dst http.Header, src http.Header, filter *responseheaders.CompiledHeaderFilter) {
+func writeAnthropicPassthroughResponseHeaders(c *gin.Context, src http.Header, filter *responseheaders.CompiledHeaderFilter) {
+	if c == nil {
+		return
+	}
+	dst := c.Writer.Header()
 	if dst == nil || src == nil {
 		return
 	}
 	if filter != nil {
-		responseheaders.WriteFilteredHeaders(dst, src, filter)
+		writeFilteredResponseHeadersForContext(c, src, filter)
 		return
 	}
 	if v := strings.TrimSpace(src.Get("Content-Type")); v != "" {
@@ -6248,6 +6620,29 @@ func writeAnthropicPassthroughResponseHeaders(dst http.Header, src http.Header, 
 	if v := strings.TrimSpace(src.Get("x-request-id")); v != "" {
 		dst.Set("x-request-id", v)
 	}
+}
+
+func writeFilteredResponseHeadersForContext(c *gin.Context, src http.Header, filter *responseheaders.CompiledHeaderFilter) {
+	if c == nil {
+		return
+	}
+	if shouldScrubClaudeCodeAPIKeyImpersonationGatewayHeaders(c) {
+		responseheaders.WriteFilteredHeadersForClaudeCodeAPIKeyImpersonation(c.Writer.Header(), src, filter)
+		return
+	}
+	responseheaders.WriteFilteredHeaders(c.Writer.Header(), src, filter)
+}
+
+func shouldScrubClaudeCodeAPIKeyImpersonationGatewayHeaders(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw, ok := c.Get(claudeCodeAPIKeyImpersonationResponseHeadersKey)
+	if !ok {
+		return false
+	}
+	enabled, ok := raw.(bool)
+	return ok && enabled
 }
 
 // ApplyBedrockCCCompat 应用 Bedrock CC 兼容转换（渠道级模型映射后调用）
@@ -6651,8 +7046,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// 确定目标URL
 	targetURL := claudeAPIURL
-	if account.Type == AccountTypeAPIKey {
-		baseURL := account.GetBaseURL()
+	if s.isAnthropicAPIKeyCredentialAccount(account) {
+		baseURL := s.anthropicAPIKeyCredentialBaseURL(account)
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
@@ -6757,7 +7152,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// Parrot 的 build_upstream_headers 只发 9 个精确 header，不透传任何客户端 header。
 	// 透传客户端 header 会引入不一致的 x-stainless-* / anthropic-beta / user-agent /
 	// x-claude-code-session-id 等值，和我们注入的伪装 header 冲突，被 Anthropic 判 third-party。
-	if tokenType != "oauth" || !mimicClaudeCode {
+	if !mimicClaudeCode {
 		for key, values := range clientHeaders {
 			lowerKey := strings.ToLower(key)
 			if allowedHeaders[lowerKey] {
@@ -6785,10 +7180,13 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
-	// OAuth + mimic Claude Code：强制注入 CLI 指纹相关 header
+	// mimic Claude Code：强制注入 CLI 指纹相关 header
 	// （user-agent/x-stainless-*/x-app/Accept/x-stainless-helper-method/x-client-request-id）
-	if tokenType == "oauth" && mimicClaudeCode {
+	if mimicClaudeCode {
 		applyClaudeCodeMimicHeaders(req, reqStream)
+	}
+	if s.shouldImpersonateClaudeCodeAPIKey(account) {
+		s.applyClaudeCodeAPIKeyImpersonationSessionHeader(c, req)
 	}
 
 	// 写入最终 anthropic-beta header
@@ -6799,8 +7197,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	// 非 APIKey impersonation 路径保持历史同步行为；impersonation 的 header 与 metadata session 独立。
+	if !s.shouldImpersonateClaudeCodeAPIKey(account) && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
 			if parsed := ParseMetadataUserID(uid); parsed != nil {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
@@ -7065,6 +7463,13 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		// 真 Claude Code 客户端透传路径
 		return stripBetaTokensWithSet(s.getBetaHeader(modelID, clientBeta), effectiveDropSet), true
 	}
+	if mimicClaudeCode {
+		requiredBetas := []string{claude.BetaOAuth, claude.BetaInterleavedThinking}
+		if !strings.Contains(strings.ToLower(modelID), "haiku") {
+			requiredBetas = claude.FullClaudeCodeMimicryBetas()
+		}
+		return mergeAnthropicBetaDropping(requiredBetas, "", effectiveDropSet), true
+	}
 
 	// API-key accounts
 	if clientBeta != "" {
@@ -7120,6 +7525,10 @@ func (s *GatewayService) computeFinalCountTokensAnthropicBeta(
 			beta = beta + "," + claude.BetaTokenCounting
 		}
 		return stripBetaTokensWithSet(beta, effectiveDropSet), true
+	}
+	if mimicClaudeCode {
+		requiredBetas := append(claude.FullClaudeCodeMimicryBetas(), claude.BetaTokenCounting)
+		return mergeAnthropicBetaDropping(requiredBetas, clientBeta, effectiveDropSet), true
 	}
 
 	// API-key accounts
@@ -7992,7 +8401,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
 
 	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		writeFilteredResponseHeadersForContext(c, resp.Header, s.responseHeaderFilter)
 	}
 
 	// 设置SSE响应头
@@ -8667,7 +9076,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 	}
 
-	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	writeFilteredResponseHeadersForContext(c, resp.Header, s.responseHeaderFilter)
 
 	contentType := "application/json"
 	if s.cfg != nil && !s.cfg.Security.ResponseHeaders.Enabled {
@@ -9785,9 +10194,11 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	}
 
 	isClaudeCodeCT := IsClaudeCodeClient(ctx) || isClaudeCodeClient(c.GetHeader("User-Agent"), parsed.MetadataUserID)
-	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCodeCT
+	shouldMimicClaudeCodeOAuth := account.IsOAuth() && !isClaudeCodeCT
+	shouldImpersonateClaudeCodeAPIKey := s.shouldImpersonateClaudeCodeAPIKey(account)
+	shouldMimicClaudeCode := shouldMimicClaudeCodeOAuth || shouldImpersonateClaudeCodeAPIKey
 
-	if shouldMimicClaudeCode {
+	if shouldMimicClaudeCodeOAuth {
 		normalizeOpts := claudeOAuthNormalizeOptions{stripSystemCacheControl: true}
 		var normalizedBody []byte
 		normalizedBody, reqModel = normalizeClaudeOAuthRequestBody(body, reqModel, normalizeOpts)
@@ -9808,6 +10219,19 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 			}
 		}
 	}
+	if shouldImpersonateClaudeCodeAPIKey {
+		impersonatedBody, err := s.applyClaudeCodeAPIKeyImpersonationToBody(ctx, c, account, body, nil, reqModel, parsed)
+		if err != nil {
+			return err
+		}
+		if err := replaceBody(impersonatedBody); err != nil {
+			return err
+		}
+		if normalizedModel := strings.TrimSpace(gjson.GetBytes(body, "model").String()); normalizedModel != "" {
+			reqModel = normalizedModel
+			parsed.Model = normalizedModel
+		}
+	}
 
 	// Antigravity 账户不支持 count_tokens，返回 404 让客户端 fallback 到本地估算。
 	// 返回 nil 避免 handler 层记录为错误，也不设置 ops 上游错误上下文。
@@ -9822,13 +10246,13 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	if reqModel != "" {
 		mappedModel := reqModel
 		mappingSource := ""
-		if account.Type == AccountTypeAPIKey {
+		if s.isAnthropicAPIKeyCredentialAccount(account) {
 			mappedModel = account.GetMappedModel(reqModel)
 			if mappedModel != reqModel {
 				mappingSource = "account"
 			}
 		}
-		if mappingSource == "" && account.Platform == PlatformAnthropic && account.Type != AccountTypeAPIKey {
+		if mappingSource == "" && account.Platform == PlatformAnthropic && !s.isAnthropicAPIKeyCredentialAccount(account) {
 			normalized := claude.NormalizeModelID(reqModel)
 			if normalized != reqModel {
 				mappedModel = normalized
@@ -10079,7 +10503,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 		return fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 	}
 
-	writeAnthropicPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	writeAnthropicPassthroughResponseHeaders(c, resp.Header, s.responseHeaderFilter)
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {
 		contentType = "application/json"
@@ -10153,8 +10577,8 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, mimicClaudeCode bool) (*http.Request, []byte, error) {
 	// 确定目标 URL
 	targetURL := claudeAPICountTokensURL
-	if account.Type == AccountTypeAPIKey {
-		baseURL := account.GetBaseURL()
+	if s.isAnthropicAPIKeyCredentialAccount(account) {
+		baseURL := s.anthropicAPIKeyCredentialBaseURL(account)
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
@@ -10236,12 +10660,14 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	// 白名单透传 headers（恢复真实 wire casing）
-	for key, values := range clientHeaders {
-		lowerKey := strings.ToLower(key)
-		if allowedHeaders[lowerKey] {
-			wireKey := resolveWireCasing(key)
-			for _, v := range values {
-				addHeaderRaw(req.Header, wireKey, v)
+	if tokenType == "oauth" || !mimicClaudeCode {
+		for key, values := range clientHeaders {
+			lowerKey := strings.ToLower(key)
+			if allowedHeaders[lowerKey] {
+				wireKey := resolveWireCasing(key)
+				for _, v := range values {
+					addHeaderRaw(req.Header, wireKey, v)
+				}
 			}
 		}
 	}
@@ -10262,9 +10688,12 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		applyClaudeOAuthHeaderDefaults(req)
 	}
 
-	// OAuth + mimic Claude Code：强制注入 CLI 指纹 header
-	if tokenType == "oauth" && mimicClaudeCode {
+	// mimic Claude Code：强制注入 CLI 指纹 header
+	if mimicClaudeCode {
 		applyClaudeCodeMimicHeaders(req, false)
+	}
+	if s.shouldImpersonateClaudeCodeAPIKey(account) {
+		s.applyClaudeCodeAPIKeyImpersonationSessionHeader(c, req)
 	}
 
 	// 写入最终 anthropic-beta header（Del 一次避免白名单透传值残留）
@@ -10273,8 +10702,8 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
 	}
 
-	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
-	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
+	// 非 APIKey impersonation 路径保持历史同步行为；impersonation 的 header 与 metadata session 独立。
+	if !s.shouldImpersonateClaudeCodeAPIKey(account) && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
 			if parsed := ParseMetadataUserID(uid); parsed != nil {
 				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)

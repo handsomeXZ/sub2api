@@ -506,3 +506,37 @@ func TestRewriteSystemForNonClaudeCodeWithPromptBlocks_UsesConfiguredBlocks(t *t
 	require.Equal(t, "tail", arr[2].Get("text").String())
 	require.Equal(t, "1h", arr[2].Get("cache_control.ttl").String())
 }
+
+func TestRewriteSystemForNonClaudeCodeWithSystemReminder_PrependsFirstUserOnlyOnce(t *testing.T) {
+	body := []byte(`{"model":"claude-3","system":"Project instructions","messages":[{"role":"assistant","content":[{"type":"text","text":"ready"}]},{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	result := rewriteSystemForNonClaudeCodeWithSystemReminder(body, "Project instructions", "", "")
+
+	system := gjson.GetBytes(result, "system")
+	require.True(t, system.IsArray())
+	require.Len(t, system.Array(), 3)
+	require.Contains(t, system.Array()[0].Get("text").String(), "x-anthropic-billing-header:")
+	require.Equal(t, claudeCodeSystemPrompt, system.Array()[1].Get("text").String())
+
+	firstUserText := gjson.GetBytes(result, "messages.1.content.0.text").String()
+	require.Equal(t, "<system-reminder>Project instructions</system-reminder>\n\nhello", firstUserText)
+	require.Equal(t, 1, strings.Count(firstUserText, "<system-reminder>"))
+	require.NotContains(t, string(result), "[System Instructions]")
+	require.NotContains(t, string(result), "Understood. I will follow these instructions.")
+
+	again := rewriteSystemForNonClaudeCodeWithSystemReminder(result, "Project instructions", "", "")
+	againText := gjson.GetBytes(again, "messages.1.content.0.text").String()
+	require.Equal(t, firstUserText, againText)
+	require.Equal(t, 1, strings.Count(againText, "<system-reminder>"))
+}
+
+func TestRewriteSystemForNonClaudeCodeWithSystemReminder_ExistingReminderSkipsPrepend(t *testing.T) {
+	body := []byte(`{"model":"claude-3","system":"Project instructions","messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>Existing</system-reminder>\n\nhello"}]}]}`)
+
+	result := rewriteSystemForNonClaudeCodeWithSystemReminder(body, "Project instructions", "", "")
+
+	firstUserText := gjson.GetBytes(result, "messages.0.content.0.text").String()
+	require.Equal(t, "<system-reminder>Existing</system-reminder>\n\nhello", firstUserText)
+	require.Equal(t, 1, strings.Count(firstUserText, "<system-reminder>"))
+	require.NotContains(t, firstUserText, "Project instructions")
+}
