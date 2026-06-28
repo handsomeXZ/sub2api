@@ -35,6 +35,12 @@ const {
       token_field: 'pending_auth_token' | 'pending_oauth_token'
       provider: string
       redirect?: string
+      invitation_code?: string
+      aff_code?: string
+      pending_adoption_decision?: {
+        adopt_display_name?: boolean
+        adopt_avatar?: boolean
+      }
       adoption_required?: boolean
       suggested_display_name?: string
       suggested_avatar_url?: string
@@ -131,6 +137,7 @@ describe('EmailVerifyView', () => {
       token_field: 'pending_auth_token',
       provider: 'wechat',
       redirect: '/profile',
+      aff_code: 'AFF123',
     }
     sessionStorage.setItem(
       'register_data',
@@ -299,6 +306,12 @@ describe('EmailVerifyView', () => {
       token_field: 'pending_auth_token',
       provider: 'wechat',
       redirect: '/profile',
+      invitation_code: 'INVITE123',
+      aff_code: 'AFF123',
+      pending_adoption_decision: {
+        adopt_display_name: false,
+        adopt_avatar: true,
+      },
     }
     sessionStorage.setItem(
       'register_data',
@@ -336,7 +349,10 @@ describe('EmailVerifyView', () => {
       email: 'fresh@example.com',
       password: 'secret-123',
       verify_code: '123456',
+      invitation_code: 'INVITE123',
       aff_code: 'AFF123',
+      adopt_display_name: false,
+      adopt_avatar: true,
     })
     expect(persistOAuthTokenContextMock).toHaveBeenCalledWith({
       access_token: 'oauth-access-token',
@@ -412,6 +428,49 @@ describe('EmailVerifyView', () => {
     expect(persistOAuthTokenContextMock).not.toHaveBeenCalled()
     expect(clearPendingAuthSessionMock).not.toHaveBeenCalled()
     expect(showSuccessMock).not.toHaveBeenCalled()
+  })
+
+  it('omits absent pending auth optional metadata from account creation payload', async () => {
+    authStoreState.pendingAuthSession = {
+      token: 'pending-token-3',
+      token_field: 'pending_auth_token',
+      provider: 'wechat',
+      redirect: '/profile',
+    }
+    sessionStorage.setItem(
+      'register_data',
+      JSON.stringify({
+        email: 'fresh@example.com',
+        password: 'secret-123',
+      })
+    )
+    apiClientPostMock.mockResolvedValue({
+      data: {
+        access_token: 'oauth-access-token',
+      },
+    })
+
+    const wrapper = mount(EmailVerifyView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: true,
+          TurnstileWidget: true,
+          transition: false,
+        },
+      },
+    })
+
+    await flushPromises()
+    await wrapper.get('#code').setValue('123456')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(apiClientPostMock).toHaveBeenCalledWith('/auth/oauth/pending/create-account', {
+      email: 'fresh@example.com',
+      password: 'secret-123',
+      verify_code: '123456',
+    })
   })
 
   it('keeps the normal email registration flow unchanged', async () => {

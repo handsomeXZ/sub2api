@@ -23,6 +23,12 @@ interface PendingAuthSessionSummary {
   token_field: PendingAuthTokenField
   provider: string
   redirect?: string
+  invitation_code?: string
+  aff_code?: string
+  pending_adoption_decision?: {
+    adopt_display_name?: boolean
+    adopt_avatar?: boolean
+  }
   adoption_required?: boolean
   suggested_display_name?: string
   suggested_avatar_url?: string
@@ -45,7 +51,7 @@ function getPersistedPendingAuthSession(): PendingAuthSessionSummary | null {
       localStorage.removeItem(PENDING_AUTH_SESSION_KEY)
       return null
     }
-    return {
+    const session: PendingAuthSessionSummary = {
       token: typeof parsed?.token === 'string' ? parsed.token : '',
       token_field: normalizePendingAuthTokenField(parsed?.token_field),
       provider,
@@ -54,6 +60,26 @@ function getPersistedPendingAuthSession(): PendingAuthSessionSummary | null {
       suggested_display_name: typeof parsed?.suggested_display_name === 'string' ? parsed.suggested_display_name : undefined,
       suggested_avatar_url: typeof parsed?.suggested_avatar_url === 'string' ? parsed.suggested_avatar_url : undefined
     }
+    if (typeof parsed?.invitation_code === 'string' && parsed.invitation_code.trim()) {
+      session.invitation_code = parsed.invitation_code.trim()
+    }
+    if (typeof parsed?.aff_code === 'string' && parsed.aff_code.trim()) {
+      session.aff_code = parsed.aff_code.trim()
+    }
+    const pendingAdoptionDecision = parsed?.pending_adoption_decision
+    if (pendingAdoptionDecision && typeof pendingAdoptionDecision === 'object') {
+      const decision: NonNullable<PendingAuthSessionSummary['pending_adoption_decision']> = {}
+      if (typeof pendingAdoptionDecision.adopt_display_name === 'boolean') {
+        decision.adopt_display_name = pendingAdoptionDecision.adopt_display_name
+      }
+      if (typeof pendingAdoptionDecision.adopt_avatar === 'boolean') {
+        decision.adopt_avatar = pendingAdoptionDecision.adopt_avatar
+      }
+      if (Object.keys(decision).length > 0) {
+        session.pending_adoption_decision = decision
+      }
+    }
+    return session
   } catch {
     localStorage.removeItem(PENDING_AUTH_SESSION_KEY)
     return null

@@ -199,6 +199,17 @@ type PendingAuthSessionSummary = {
   token_field: PendingAuthTokenField
   provider: string
   redirect?: string
+  invitation_code?: string
+  aff_code?: string
+  pending_adoption_decision?: PendingAdoptionDecisionInput
+}
+type PendingAdoptionDecision = {
+  adoptDisplayName?: boolean
+  adoptAvatar?: boolean
+}
+type PendingAdoptionDecisionInput = {
+  adopt_display_name?: boolean
+  adopt_avatar?: boolean
 }
 type PendingOAuthCreateAccountResponse = {
   auth_result?: string
@@ -220,10 +231,7 @@ const pendingAuthToken = ref<string>('')
 const pendingAuthTokenField = ref<PendingAuthTokenField>('pending_auth_token')
 const pendingProvider = ref<string>('')
 const pendingRedirect = ref<string>('')
-const pendingAdoptionDecision = ref<{
-  adoptDisplayName?: boolean
-  adoptAvatar?: boolean
-} | null>(null)
+const pendingAdoptionDecision = ref<PendingAdoptionDecision | null>(null)
 const hasRegisterData = ref<boolean>(false)
 
 // Public settings
@@ -266,18 +274,15 @@ onMounted(async () => {
       password.value = registerData.password || ''
       initialTurnstileToken.value = registerData.turnstile_token || ''
       promoCode.value = registerData.promo_code || ''
-      invitationCode.value = registerData.invitation_code || ''
-      affCode.value = registerData.aff_code || loadAffiliateReferralCode()
+      invitationCode.value = registerData.invitation_code || activePendingSession?.invitation_code || ''
+      affCode.value = registerData.aff_code || activePendingSession?.aff_code || loadAffiliateReferralCode()
       pendingAuthToken.value = registerData.pending_auth_token || activePendingSession?.token || ''
       pendingAuthTokenField.value = registerData.pending_auth_token_field || activePendingSession?.token_field || 'pending_auth_token'
       pendingProvider.value = registerData.pending_provider || activePendingSession?.provider || ''
       pendingRedirect.value = registerData.pending_redirect || activePendingSession?.redirect || ''
-      pendingAdoptionDecision.value = registerData.pending_adoption_decision
-        ? {
-            adoptDisplayName: registerData.pending_adoption_decision.adopt_display_name === true,
-            adoptAvatar: registerData.pending_adoption_decision.adopt_avatar === true
-          }
-        : null
+      pendingAdoptionDecision.value = normalizePendingAdoptionDecision(
+        registerData.pending_adoption_decision || activePendingSession?.pending_adoption_decision
+      )
       hasRegisterData.value = !!(email.value && password.value)
     } catch {
       hasRegisterData.value = false
@@ -287,6 +292,9 @@ onMounted(async () => {
     pendingAuthTokenField.value = activePendingSession.token_field
     pendingProvider.value = activePendingSession.provider
     pendingRedirect.value = activePendingSession.redirect || ''
+    invitationCode.value = activePendingSession.invitation_code || ''
+    affCode.value = activePendingSession.aff_code || loadAffiliateReferralCode()
+    pendingAdoptionDecision.value = normalizePendingAdoptionDecision(activePendingSession.pending_adoption_decision)
   }
 
   // Load public settings
@@ -390,7 +398,46 @@ function persistPendingOAuthSession(provider: string, redirect?: string): void {
     token_field: pendingAuthTokenField.value,
     provider: provider.trim() || pendingProvider.value.trim(),
     redirect: redirect || pendingRedirect.value || undefined,
+    ...(invitationCode.value ? { invitation_code: invitationCode.value } : {}),
+    ...oauthAffiliatePayload(affCode.value || loadAffiliateReferralCode()),
+    ...serializePendingAdoptionSession(pendingAdoptionDecision.value),
   })
+}
+
+function normalizePendingAdoptionDecision(
+  value: PendingAdoptionDecisionInput | null | undefined
+): PendingAdoptionDecision | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const decision: PendingAdoptionDecision = {}
+  if (typeof value.adopt_display_name === 'boolean') {
+    decision.adoptDisplayName = value.adopt_display_name
+  }
+  if (typeof value.adopt_avatar === 'boolean') {
+    decision.adoptAvatar = value.adopt_avatar
+  }
+  return Object.keys(decision).length > 0 ? decision : null
+}
+
+function serializePendingAdoptionDecision(
+  decision: PendingAdoptionDecision | null
+): Record<string, boolean> {
+  const payload: Record<string, boolean> = {}
+  if (typeof decision?.adoptDisplayName === 'boolean') {
+    payload.adopt_display_name = decision.adoptDisplayName
+  }
+  if (typeof decision?.adoptAvatar === 'boolean') {
+    payload.adopt_avatar = decision.adoptAvatar
+  }
+  return payload
+}
+
+function serializePendingAdoptionSession(
+  decision: PendingAdoptionDecision | null
+): { pending_adoption_decision?: PendingAdoptionDecisionInput } {
+  const payload = serializePendingAdoptionDecision(decision)
+  return Object.keys(payload).length > 0 ? { pending_adoption_decision: payload } : {}
 }
 
 // ==================== Send Code ====================
@@ -506,10 +553,9 @@ async function handleVerify(): Promise<void> {
           email: email.value,
           password: password.value,
           verify_code: verifyCode.value.trim(),
-          invitation_code: invitationCode.value || undefined,
+          ...(invitationCode.value ? { invitation_code: invitationCode.value } : {}),
           ...oauthAffiliatePayload(affCode.value || loadAffiliateReferralCode()),
-          adopt_display_name: pendingAdoptionDecision.value?.adoptDisplayName,
-          adopt_avatar: pendingAdoptionDecision.value?.adoptAvatar
+          ...serializePendingAdoptionDecision(pendingAdoptionDecision.value)
         }
       )
       if (isPendingOAuthSessionResponse(data)) {

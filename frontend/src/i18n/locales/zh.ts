@@ -3854,6 +3854,9 @@ export default {
         baseUrlHint: '上游 Antigravity 服务的地址，例如：https://cloudcode-pa.googleapis.com',
         apiKey: '上游 API Key',
         apiKeyHint: '上游服务的 API Key',
+        claudeCodeIdentityImpersonation: 'Claude Code 身份伪装',
+        claudeCodeIdentityImpersonationDesc:
+          '让该上游 Anthropic API Key 模拟 Claude Code 的身份请求头和 metadata。',
         pleaseEnterBaseUrl: '请输入上游 Base URL',
         pleaseEnterApiKey: '请输入上游 API Key'
       },

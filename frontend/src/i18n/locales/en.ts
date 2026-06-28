@@ -3705,6 +3705,9 @@ export default {
         baseUrlHint: 'The address of the upstream Antigravity service, e.g., https://cloudcode-pa.googleapis.com',
         apiKey: 'Upstream API Key',
         apiKeyHint: 'API Key for the upstream service',
+        claudeCodeIdentityImpersonation: 'Claude Code identity impersonation',
+        claudeCodeIdentityImpersonationDesc:
+          'Make this upstream Anthropic API key emulate Claude Code identity headers and metadata.',
         pleaseEnterBaseUrl: 'Please enter upstream Base URL',
         pleaseEnterApiKey: 'Please enter upstream API Key'
       },

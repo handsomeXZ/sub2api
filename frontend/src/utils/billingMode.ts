@@ -19,22 +19,40 @@ export function getBillingModeBadgeClass(mode: string | null | undefined): strin
 }
 
 interface ImageBillingRow {
-  image_count: number
+  image_count?: number | null
+  image_size?: string | null
+  image_input_size?: string | null
+  image_output_size?: string | null
+  image_size_source?: string | null
+  image_size_breakdown?: Record<string, number | null | undefined> | null
   billing_mode?: string | null
   total_cost: number
 }
 
-export function isImageUsage(row: Pick<ImageBillingRow, 'image_count' | 'billing_mode'> | null | undefined): boolean {
-  return (row?.image_count ?? 0) > 0 && row?.billing_mode !== BILLING_MODE_TOKEN
+function hasImageBillingMetadata(row: Partial<ImageBillingRow> | null | undefined): boolean {
+  if ((row?.image_count ?? 0) > 0) return true
+  if (row?.image_size?.trim()) return true
+  if (row?.image_input_size?.trim()) return true
+  if (row?.image_output_size?.trim()) return true
+  if (row?.image_size_source?.trim()) return true
+  const breakdown = row?.image_size_breakdown
+  return !!breakdown && Object.values(breakdown).some((count) => (count ?? 0) > 0)
 }
 
-export function getDisplayBillingMode(row: Pick<ImageBillingRow, 'billing_mode' | 'image_count'> | null | undefined): string | null | undefined {
-  return row?.billing_mode
+export function isImageUsage(row: Partial<ImageBillingRow> | null | undefined): boolean {
+  return getDisplayBillingMode(row) === BILLING_MODE_IMAGE
+}
+
+export function getDisplayBillingMode(row: Partial<ImageBillingRow> | null | undefined): string {
+  if (row?.billing_mode) return row.billing_mode
+  if (hasImageBillingMetadata(row)) return BILLING_MODE_IMAGE
+  return BILLING_MODE_TOKEN
 }
 
 export function imageUnitPrice(row: Pick<ImageBillingRow, 'image_count' | 'total_cost'> | null): number {
-  if (!row || row.image_count <= 0) return 0
-  const total = row.total_cost ?? 0
-  const price = total / row.image_count
+  const imageCount = row?.image_count ?? 0
+  if (imageCount <= 0) return 0
+  const total = row?.total_cost ?? 0
+  const price = total / imageCount
   return Number.isFinite(price) ? price : 0
 }
