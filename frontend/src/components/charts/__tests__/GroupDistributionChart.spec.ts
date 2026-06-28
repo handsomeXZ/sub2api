@@ -42,6 +42,7 @@ describe('GroupDistributionChart', () => {
       total_tokens: 1200,
       cost: 1.8,
       actual_cost: 0.1,
+      account_cost: 0.12,
     },
     {
       group_id: 2,
@@ -50,6 +51,7 @@ describe('GroupDistributionChart', () => {
       total_tokens: 600,
       cost: 0.7,
       actual_cost: 0.9,
+      account_cost: 0.72,
     },
   ]
 
@@ -110,5 +112,46 @@ describe('GroupDistributionChart', () => {
       dataset: { data: [0.9, 0.1] },
     })
     expect(label).toBe('group-b: $0.900 (90.0%)')
+  })
+
+  it('formats missing cost fields as zero without changing token ordering', () => {
+    const wrapper = mount(GroupDistributionChart, {
+      props: {
+        groupStats: [
+          {
+            group_id: 1,
+            group_name: 'group-a',
+            requests: 9,
+            total_tokens: 1200,
+            cost: undefined,
+            actual_cost: undefined,
+            account_cost: undefined,
+          },
+          {
+            group_id: 2,
+            group_name: 'group-b',
+            requests: 4,
+            total_tokens: 600,
+            cost: null,
+            actual_cost: null,
+            account_cost: null,
+          },
+        ] as any,
+      },
+      global: {
+        stubs: {
+          LoadingSpinner: true,
+        },
+      },
+    })
+
+    const chartData = JSON.parse(wrapper.find('.chart-data').text())
+    expect(chartData.datasets[0].data).toEqual([1200, 600])
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0].text()).toContain('group-a')
+    expect(rows[0].text()).toContain('$0.0000')
+    expect(rows[1].text()).toContain('group-b')
+    expect(rows[1].text()).toContain('$0.0000')
   })
 })

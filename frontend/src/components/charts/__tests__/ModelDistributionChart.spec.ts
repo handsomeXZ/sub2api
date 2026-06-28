@@ -53,6 +53,7 @@ describe('ModelDistributionChart', () => {
       total_tokens: 1000,
       cost: 1.5,
       actual_cost: 0.2,
+      account_cost: 0.22,
     },
     {
       model: 'model-b',
@@ -64,6 +65,7 @@ describe('ModelDistributionChart', () => {
       total_tokens: 500,
       cost: 0.5,
       actual_cost: 1.4,
+      account_cost: 1.44,
     },
   ]
 
@@ -124,6 +126,53 @@ describe('ModelDistributionChart', () => {
       dataset: { data: [1.4, 0.2] },
     })
     expect(label).toBe('model-b: $1.40 (87.5%)')
+  })
+
+  it('formats missing cost fields as zero without changing token ordering', () => {
+    const wrapper = mount(ModelDistributionChart, {
+      props: {
+        modelStats: [
+          {
+            model: 'model-a',
+            requests: 8,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 1000,
+            cost: undefined,
+            actual_cost: undefined,
+            account_cost: undefined,
+          },
+          {
+            model: 'model-b',
+            requests: 3,
+            input_tokens: 40,
+            output_tokens: 20,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 500,
+            cost: null,
+            actual_cost: null,
+            account_cost: null,
+          },
+        ] as any,
+      },
+      global: {
+        stubs: {
+          LoadingSpinner: true,
+        },
+      },
+    })
+
+    const chartData = JSON.parse(wrapper.find('.chart-data').text())
+    expect(chartData.datasets[0].data).toEqual([1000, 500])
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0].text()).toContain('model-a')
+    expect(rows[0].text()).toContain('$0.0000')
+    expect(rows[1].text()).toContain('model-b')
+    expect(rows[1].text()).toContain('$0.0000')
   })
 
   it('renders Others in the spending ranking table and uses a dedicated chart color', async () => {
