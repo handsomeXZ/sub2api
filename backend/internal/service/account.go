@@ -1481,6 +1481,22 @@ func (a *Account) IsAnthropicAPIKeyPassthroughEnabled() bool {
 	return ok && enabled
 }
 
+// IsClaudeCodeIdentityImpersonationEnabled 返回 Anthropic API Key/upstream 凭证账号是否启用 ClaudeCode API Key 身份模拟。
+// 字段：accounts.extra.claude_code_identity_impersonation_enabled。
+// 字段缺失或类型不正确时，按 false（关闭）处理。
+func (a *Account) IsClaudeCodeIdentityImpersonationEnabled() bool {
+	if a == nil || a.Platform != PlatformAnthropic || a.Extra == nil {
+		return false
+	}
+	switch a.Type {
+	case AccountTypeAPIKey, AccountTypeUpstream:
+	default:
+		return false
+	}
+	enabled, ok := a.Extra["claude_code_identity_impersonation_enabled"].(bool)
+	return ok && enabled
+}
+
 // WebSearch 模拟三态常量
 const (
 	WebSearchModeDefault  = "default"  // 跟随渠道配置
