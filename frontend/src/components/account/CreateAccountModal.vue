@@ -2587,6 +2587,25 @@
         </div>
       </div>
 
+      <!-- Anthropic API Key: Claude Code identity impersonation -->
+      <div
+        v-if="form.platform === 'anthropic' && accountCategory === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.upstream.claudeCodeIdentityImpersonation') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.upstream.claudeCodeIdentityImpersonationDesc') }}
+            </p>
+          </div>
+          <Toggle
+            v-model="claudeCodeIdentityImpersonationEnabled"
+            data-testid="claude-code-identity-impersonation-enabled"
+          />
+        </div>
+      </div>
+
       <!-- Anthropic API Key: Web Search Emulation (hidden when global disabled) -->
       <div
         v-if="form.platform === 'anthropic' && accountCategory === 'apikey' && webSearchGlobalEnabled"
@@ -3232,6 +3251,7 @@ import type {
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
+import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
@@ -3422,6 +3442,7 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAllowClaudeCodeEnabled = ref(false)
 const anthropicPassthroughEnabled = ref(false)
+const claudeCodeIdentityImpersonationEnabled = ref(false)
 const webSearchEmulationMode = ref('default')
 const webSearchGlobalEnabled = ref(false)
 const {
@@ -3849,6 +3870,7 @@ watch(
     }
     if (newPlatform !== 'anthropic') {
       anthropicPassthroughEnabled.value = false
+      claudeCodeIdentityImpersonationEnabled.value = false
       webSearchEmulationMode.value = 'default'
     }
     // Reset OAuth states
@@ -3870,6 +3892,7 @@ watch(
     }
     if (platform !== 'anthropic' || category !== 'apikey') {
       anthropicPassthroughEnabled.value = false
+      claudeCodeIdentityImpersonationEnabled.value = false
       webSearchEmulationMode.value = 'default'
     }
   }
@@ -4249,6 +4272,7 @@ const resetForm = () => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAllowClaudeCodeEnabled.value = false
   anthropicPassthroughEnabled.value = false
+  claudeCodeIdentityImpersonationEnabled.value = false
   webSearchEmulationMode.value = 'default'
   // Reset quota control state
   windowCostEnabled.value = false
@@ -4666,13 +4690,17 @@ const handleSubmit = async () => {
 
   form.credentials = credentials
   const extra = buildAnthropicExtra(buildOpenAIExtra())
-
-  await doCreateAccount({
+  const createPayload: CreateAccountRequest = {
     ...form,
     group_ids: form.group_ids,
     extra,
     auto_pause_on_expired: autoPauseOnExpired.value
-  })
+  }
+  if (form.platform === 'anthropic' && accountCategory.value === 'apikey') {
+    createPayload.claude_code_identity_impersonation_enabled = claudeCodeIdentityImpersonationEnabled.value
+  }
+
+  await doCreateAccount(createPayload)
 }
 
 const goBackToBasicInfo = () => {
