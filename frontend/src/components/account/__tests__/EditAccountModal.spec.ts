@@ -123,7 +123,7 @@ function buildAccount() {
     platform: 'openai',
     type: 'apikey',
     credentials: {
-      api_key: 'sk-test',
+      api_key: 'openai-key-placeholder',
       base_url: 'https://api.openai.com',
       model_mapping: {
         'gpt-5.2': 'gpt-5.2'
@@ -154,6 +154,52 @@ function buildVertexAccount() {
       client_email: 'sa@example.iam.gserviceaccount.com',
       location: 'us-central1',
       tier_id: 'vertex'
+    },
+    extra: {},
+    proxy_id: null,
+    concurrency: 1,
+    priority: 1,
+    rate_multiplier: 1,
+    status: 'active',
+    group_ids: [],
+    expires_at: null,
+    auto_pause_on_expired: false
+  } as any
+}
+
+function buildUpstreamAccount() {
+  return {
+    id: 3,
+    name: 'Anthropic Upstream',
+    notes: '',
+    platform: 'anthropic',
+    type: 'upstream',
+    credentials: {
+      api_key: 'anthropic-upstream-key-placeholder',
+      base_url: 'https://api.anthropic.com'
+    },
+    extra: {},
+    proxy_id: null,
+    concurrency: 1,
+    priority: 1,
+    rate_multiplier: 1,
+    status: 'active',
+    group_ids: [],
+    expires_at: null,
+    auto_pause_on_expired: false
+  } as any
+}
+
+function buildAnthropicApiKeyAccount() {
+  return {
+    id: 4,
+    name: 'Anthropic Key',
+    notes: '',
+    platform: 'anthropic',
+    type: 'apikey',
+    credentials: {
+      api_key: 'anthropic-key-placeholder',
+      base_url: 'https://api.anthropic.com'
     },
     extra: {},
     proxy_id: null,
@@ -462,6 +508,144 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('codex_image_generation_bridge_enabled')
   })
 
+  it('defaults Claude Code identity impersonation off for upstream accounts when missing', async () => {
+    // Historical upstream rows stay default off in the admin UI until someone explicitly enables the switch.
+    const account = buildUpstreamAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]')
+
+    expect(toggle.attributes('aria-checked')).toBe('false')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(false)
+  })
+
+  it('falls back to extra Claude Code identity impersonation state for upstream accounts', async () => {
+    // Migration note: legacy storage can still hydrate from extra before save normalizes back to the top-level field.
+    const account = buildUpstreamAccount()
+    account.extra = {
+      claude_code_identity_impersonation_enabled: true
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]')
+
+    expect(toggle.attributes('aria-checked')).toBe('true')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(true)
+  })
+
+  it('submits Claude Code identity impersonation true for upstream accounts after enabling', async () => {
+    const account = buildUpstreamAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+
+    await wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(true)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toBeUndefined()
+  })
+
+  it('allows upstream accounts to explicitly disable Claude Code identity impersonation', async () => {
+    // The accepted divergence details live in the backend audit test, while this UI test only locks the explicit opt-in or opt-out flow.
+    const account = buildUpstreamAccount()
+    account.claude_code_identity_impersonation_enabled = true
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]')
+
+    expect(toggle.attributes('aria-checked')).toBe('true')
+
+    await toggle.trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(false)
+  })
+
+  it('renders and submits Claude Code identity impersonation for Anthropic API key accounts', async () => {
+    const account = buildAnthropicApiKeyAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]')
+
+    expect(wrapper.text()).toContain('admin.accounts.upstream.claudeCodeIdentityImpersonation')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+
+    await toggle.trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(true)
+  })
+
+  it('uses the top-level Claude Code identity impersonation value before extra for Anthropic API key accounts', async () => {
+    const account = buildAnthropicApiKeyAccount()
+    account.claude_code_identity_impersonation_enabled = false
+    account.extra = {
+      claude_code_identity_impersonation_enabled: true
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="claude-code-identity-impersonation-enabled"]')
+
+    expect(toggle.attributes('aria-checked')).toBe('false')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.claude_code_identity_impersonation_enabled).toBe(false)
+  })
+
+  it('does not render or serialize Claude Code identity impersonation for non-Anthropic API key accounts', async () => {
+    const account = buildAccount()
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+
+    expect(wrapper.find('[data-testid="claude-code-identity-impersonation-enabled"]').exists()).toBe(false)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]).not.toHaveProperty('claude_code_identity_impersonation_enabled')
+  })
+
   it('allows saving apikey account when backend redacted api_key but credentials_status reports it exists', async () => {
     // 新前端 + 新后端：响应已脱敏，credentials 里没有 api_key，credentials_status.has_api_key=true
     const account = buildAccount()
@@ -500,7 +684,7 @@ describe('EditAccountModal', () => {
 
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     // 旧后端响应未脱敏，原 api_key 会随 currentCredentials 一起传回去（旧行为，等价于无操作）
-    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.api_key).toBe('sk-test')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.api_key).toBe('openai-key-placeholder')
   })
 
   it('blocks apikey save when neither credentials_status nor legacy api_key indicates existence', async () => {

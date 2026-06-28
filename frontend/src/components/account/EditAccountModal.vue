@@ -577,6 +577,20 @@
           />
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
         </div>
+        <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.upstream.claudeCodeIdentityImpersonation') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.upstream.claudeCodeIdentityImpersonationDesc') }}
+              </p>
+            </div>
+            <Toggle
+              v-model="claudeCodeIdentityImpersonationEnabled"
+              data-testid="claude-code-identity-impersonation-enabled"
+            />
+          </div>
+        </div>
       </div>
 
       <!-- Vertex Service Account -->
@@ -1522,6 +1536,25 @@
         </div>
       </div>
 
+      <!-- Anthropic API Key: Claude Code identity impersonation -->
+      <div
+        v-if="account?.platform === 'anthropic' && account?.type === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.upstream.claudeCodeIdentityImpersonation') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.upstream.claudeCodeIdentityImpersonationDesc') }}
+            </p>
+          </div>
+          <Toggle
+            v-model="claudeCodeIdentityImpersonationEnabled"
+            data-testid="claude-code-identity-impersonation-enabled"
+          />
+        </div>
+      </div>
+
       <!-- Anthropic API Key: Web Search Emulation (hidden when global disabled) -->
       <div
         v-if="account?.platform === 'anthropic' && account?.type === 'apikey' && webSearchGlobalEnabled"
@@ -2392,6 +2425,7 @@ import type {
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
+import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
@@ -2524,6 +2558,7 @@ const customErrorCodesEnabled = ref(false)
 const selectedErrorCodes = ref<number[]>([])
 const customErrorCodeInput = ref<number | null>(null)
 const interceptWarmupRequests = ref(false)
+const claudeCodeIdentityImpersonationEnabled = ref(false)
 const autoPauseOnExpired = ref(false)
 const autoPause5hThreshold = ref<number | null>(null)
 const autoPause7dThreshold = ref<number | null>(null)
@@ -2911,6 +2946,13 @@ const loadModelRestrictionFromMapping = (rawMapping?: Record<string, unknown>) =
 const buildModelRestrictionMapping = () =>
   buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
 
+const readClaudeCodeIdentityImpersonationEnabled = (account: Account) => {
+  if (typeof account.claude_code_identity_impersonation_enabled === 'boolean') {
+    return account.claude_code_identity_impersonation_enabled
+  }
+  return account.extra?.claude_code_identity_impersonation_enabled === true
+}
+
 const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
@@ -2936,6 +2978,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   // Load intercept warmup requests setting (applies to all account types)
   const credentials = newAccount.credentials as Record<string, unknown> | undefined
   interceptWarmupRequests.value = credentials?.intercept_warmup_requests === true
+  claudeCodeIdentityImpersonationEnabled.value = readClaudeCodeIdentityImpersonationEnabled(newAccount)
   autoPauseOnExpired.value = newAccount.auto_pause_on_expired === true
   editVertexProjectId.value = ''
   editVertexClientEmail.value = ''
@@ -3760,6 +3803,9 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+      if (props.account.platform === 'anthropic') {
+        updatePayload.claude_code_identity_impersonation_enabled = claudeCodeIdentityImpersonationEnabled.value
+      }
     } else if (props.account.type === 'upstream') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
@@ -3778,6 +3824,7 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+      updatePayload.claude_code_identity_impersonation_enabled = claudeCodeIdentityImpersonationEnabled.value
     } else if ((props.account.platform === 'gemini' || props.account.platform === 'anthropic') && props.account.type === 'service_account') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
