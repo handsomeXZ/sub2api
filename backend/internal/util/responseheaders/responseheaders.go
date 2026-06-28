@@ -41,6 +41,15 @@ var hopByHopHeaders = map[string]struct{}{
 	"connection":        {},
 }
 
+var claudeCodeAPIKeyImpersonationGatewayHeaderPrefixes = []string{
+	"x-litellm-",
+	"helicone-",
+	"x-portkey-",
+	"cf-aig-",
+	"x-kong-",
+	"x-bt-",
+}
+
 type CompiledHeaderFilter struct {
 	allowed     map[string]struct{}
 	forceRemove map[string]struct{}
@@ -107,8 +116,37 @@ func FilterHeaders(src http.Header, filter *CompiledHeaderFilter) http.Header {
 	return filtered
 }
 
+func FilterHeadersForClaudeCodeAPIKeyImpersonation(src http.Header, filter *CompiledHeaderFilter) http.Header {
+	filtered := FilterHeaders(src, filter)
+	for key := range filtered {
+		if isClaudeCodeAPIKeyImpersonationGatewayHeader(key) {
+			delete(filtered, key)
+		}
+	}
+	return filtered
+}
+
+func isClaudeCodeAPIKeyImpersonationGatewayHeader(key string) bool {
+	lower := strings.ToLower(key)
+	for _, prefix := range claudeCodeAPIKeyImpersonationGatewayHeaderPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func WriteFilteredHeaders(dst http.Header, src http.Header, filter *CompiledHeaderFilter) {
 	filtered := FilterHeaders(src, filter)
+	for key, values := range filtered {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func WriteFilteredHeadersForClaudeCodeAPIKeyImpersonation(dst http.Header, src http.Header, filter *CompiledHeaderFilter) {
+	filtered := FilterHeadersForClaudeCodeAPIKeyImpersonation(src, filter)
 	for key, values := range filtered {
 		for _, value := range values {
 			dst.Add(key, value)
