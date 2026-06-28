@@ -227,6 +227,9 @@ type Account struct {
 	CustomBaseURLEnabled *bool   `json:"custom_base_url_enabled,omitempty"`
 	CustomBaseURL        *string `json:"custom_base_url,omitempty"`
 
+	// Claude Code 身份模拟（仅 upstream 账号有效）
+	ClaudeCodeIdentityImpersonationEnabled *bool `json:"claude_code_identity_impersonation_enabled,omitempty"`
+
 	// API Key 账号配额限制
 	QuotaLimit       *float64 `json:"quota_limit,omitempty"`
 	QuotaUsed        *float64 `json:"quota_used,omitempty"`

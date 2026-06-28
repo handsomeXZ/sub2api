@@ -8,6 +8,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
+const claudeCodeIdentityImpersonationEnabledKey = "claude_code_identity_impersonation_enabled"
+
 func UserFromServiceShallow(u *service.User) *User {
 	if u == nil {
 		return nil
@@ -289,6 +291,12 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 			if customURL := a.GetCustomBaseURL(); customURL != "" {
 				out.CustomBaseURL = &customURL
 			}
+		}
+	}
+
+	if a.Type == service.AccountTypeUpstream && a.Extra != nil {
+		if enabled, ok := a.Extra[claudeCodeIdentityImpersonationEnabledKey].(bool); ok {
+			out.ClaudeCodeIdentityImpersonationEnabled = &enabled
 		}
 	}
 

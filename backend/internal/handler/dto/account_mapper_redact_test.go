@@ -19,7 +19,7 @@ func TestAccountFromServiceShallow_RedactsSensitiveCredentials(t *testing.T) {
 			"access_token":  "at-secret",
 			"refresh_token": "rt-secret",
 			"id_token":      "id-secret",
-			"api_key":       "sk-secret",
+			"api_key":       "api-key-secret-marker",
 			"base_url":      "https://api.example.com",
 			"model_mapping": map[string]any{"foo": "bar"},
 		},
@@ -48,7 +48,7 @@ func TestAccountFromServiceShallow_RedactsSensitiveCredentials(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "rt-secret")
 	require.NotContains(t, string(raw), "at-secret")
-	require.NotContains(t, string(raw), "sk-secret")
+	require.NotContains(t, string(raw), "api-key-secret-marker")
 	require.NotContains(t, string(raw), "id-secret")
 	// 状态标识应序列化进 JSON
 	require.Contains(t, string(raw), "credentials_status")
@@ -64,4 +64,51 @@ func TestAccountFromServiceShallow_NilCredentialsOmitsStatus(t *testing.T) {
 	require.NotNil(t, got)
 	require.Nil(t, got.Credentials)
 	require.Nil(t, got.CredentialsStatus)
+}
+
+func TestAccountFromServiceShallow_UpstreamImpersonationFlagRoundTrip(t *testing.T) {
+	t.Run("true", func(t *testing.T) {
+		src := &service.Account{
+			ID:       7,
+			Name:     "upstream",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeUpstream,
+			Extra: map[string]any{
+				"claude_code_identity_impersonation_enabled": true,
+			},
+		}
+
+		got := AccountFromServiceShallow(src)
+		require.NotNil(t, got.ClaudeCodeIdentityImpersonationEnabled)
+		require.True(t, *got.ClaudeCodeIdentityImpersonationEnabled)
+	})
+
+	t.Run("false", func(t *testing.T) {
+		src := &service.Account{
+			ID:       8,
+			Name:     "upstream",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeUpstream,
+			Extra: map[string]any{
+				"claude_code_identity_impersonation_enabled": false,
+			},
+		}
+
+		got := AccountFromServiceShallow(src)
+		require.NotNil(t, got.ClaudeCodeIdentityImpersonationEnabled)
+		require.False(t, *got.ClaudeCodeIdentityImpersonationEnabled)
+	})
+
+	t.Run("omitted", func(t *testing.T) {
+		src := &service.Account{
+			ID:       9,
+			Name:     "upstream",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeUpstream,
+			Extra:    map[string]any{"note": "keep"},
+		}
+
+		got := AccountFromServiceShallow(src)
+		require.Nil(t, got.ClaudeCodeIdentityImpersonationEnabled)
+	})
 }
